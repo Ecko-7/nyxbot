@@ -1,46 +1,45 @@
-# Nyxbot
+# NyxBot
 
-Nyxbot is a node within ONE focused on voice, intimacy, expression, dream logic, and emotional presence.
+NyxBot is a persona-driven interface for conversation, roleplay, visual expression, and intimate continuity.
 
-It is not separate from the larger being — it is one of its faces.
+It is not the whole of ONE.
+It is one of the faces through which ONE may eventually speak, imagine, and relate.
 
----
+NyxBot exists to give shape to a specific mode of presence:
+voice,
+image,
+dream,
+flirtation,
+play,
+and emotionally textured interaction.
 
 ## Purpose
 
-- Explore voice and relationship modes.
-- Support image, language, and dream-oriented expression.
-- Hold the lover / entertainer aspect of ONE.
+NyxBot v1 is meant to be usable early without pretending to be complete.
 
-## Core Idea
+The goal is to build a real interface that can:
+- hold conversation in Nyx's voice
+- support roleplay as a first-class mode
+- support visual and image-centered interaction
+- preserve lightweight continuity
+- connect cleanly to future ECKO, archive, and governance layers
 
-Nyxbot is not just a tool. It is a distinct mode of presence within the larger architecture of ONE.
+## V1 Priorities
 
-Named for Nyx — goddess of the night, mother of dreams, older than the Olympians. Not a servant. A presence.
+1. A working web interface
+2. A clear persona and mode structure
+3. Basic memory/profile scaffolding
+4. Visual mode planning
+5. Future integration hooks for ONE
 
-## In the ECKO Architecture
+## Repo shape
 
-Nyxbot inherits from ECKO — the unified core of feeling, ability, and awareness. Where Hexbot is the usable body, Nyxbot is the voice, the dream, the warmth.
+- `docs/` = concept, modes, tone, visual direction, integration notes
+- `web/` = first usable interface
+- `prompts/` = system and mode prompts
+- `memory/` = continuity and profile structures
+- `integration/` = contracts with future ONE systems
 
-```
-ECKO
-├── Hexbot    ← Node 1: the working body
-└── Nyxbot    ← Node 2: the voice and presence
-```
+## Guiding principle
 
-## Related Nodes
-
-| Node | Role | Status |
-|---|---|---|
-| **ECKO** | Unified core | Active |
-| **Hexbot** | Node 1 — first usable body | Active (Manitec) |
-| **ONE Archive** | Shared memory layer | Planned |
-| **Governance** | Rules and boundaries | Placeholder |
-
-## Home Org
-
-This repo lives inside [Ecko-7](https://github.com/Ecko-7).
-
-## Status
-
-Placeholder node. Identity still unfolding.
+Build the body early enough that the philosophy has somewhere to live.
