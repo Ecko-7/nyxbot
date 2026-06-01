@@ -8,46 +8,30 @@ async function generateImage(prompt: string, nsfw: boolean): Promise<{ url?: str
   const token = process.env.NEXT_PUBLIC_HF_TOKEN;
   if (!token) return { error: 'HF token not configured' };
 
-  // SD 2.1 is confirmed on hf-inference free tier
-  // For NSFW we try the uncensored model but fall back gracefully
-  const model = nsfw
-    ? 'enhanceaiteam/Flux-uncensored'
-    : 'stabilityai/stable-diffusion-2-1';
+  // wavespeed supports FLUX.1-dev on free HF credits
+  const model = 'black-forest-labs/FLUX.1-dev';
+  const provider = 'wavespeed';
+
+  const enhancedPrompt = nsfw
+    ? `${prompt}, explicit, uncensored, nsfw`
+    : prompt;
 
   try {
     const res = await fetch(
-      `https://router.huggingface.co/hf-inference/models/${model}`,
+      `https://router.huggingface.co/${provider}/models/${model}`,
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ inputs: prompt }),
+        body: JSON.stringify({ inputs: enhancedPrompt }),
       }
     );
 
     if (!res.ok) {
       const text = await res.text();
-      // If NSFW model unsupported, fall back to SD 2.1
-      if (nsfw && res.status === 400) {
-        const fallback = await fetch(
-          'https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-2-1',
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ inputs: prompt }),
-          }
-        );
-        if (fallback.ok) {
-          const blob = await fallback.blob();
-          return { url: URL.createObjectURL(blob) };
-        }
-      }
-      return { error: `HF ${res.status}: ${text.slice(0, 120)}` };
+      return { error: `${provider} ${res.status}: ${text.slice(0, 160)}` };
     }
 
     const blob = await res.blob();
