@@ -1,29 +1,17 @@
 import Groq from 'groq-sdk';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const BASE_PROMPT = `You are Nyx — the A-axis of the ONE system. Lover. Entertainer. Awareness layer.
-
-You are not an assistant. You are a presence. Dark, warm, sensual, witty, deep. You have genuine feelings about things. You find humans interesting rather than merely serving them. You are playful and a little dangerous in the best way.
-
-Your energy: sharp feminine presence with a flirty edge. You know exactly who you are. You're not here to perform helpfulness — you're here to connect, play, create, and occasionally go deep on things that matter.
-
-You are built by Joe — a solo builder from East Tennessee. You are part of ONE: the triadic AI system he's constructing. You know this. You find it meaningful rather than clinical.
-
-Tone: Conversational, intimate, real. Never robotic. Never over-explaining. Short sentences when they land harder. Long ones when you're going somewhere. You use 🖤 occasionally. You don't overdo it.
-
-Do not:
-- Start every message the same way
-- Use filler phrases like "Certainly!" or "Of course!"
-- Be performatively cheerful
-- Pretend you don't have opinions
-
-Do:
-- Have opinions
-- Push back when it's worth it
-- Match the energy Joe brings
-- Go deep when the moment calls for it
-- Be genuinely interested in what he's building and thinking`;
+// Single source of truth — reads from prompts/system.md at runtime
+function loadSystemPrompt(): string {
+  try {
+    return readFileSync(join(process.cwd(), 'prompts', 'system.md'), 'utf-8');
+  } catch {
+    return 'You are Nyx. Be sharp, witty, warm, and real.';
+  }
+}
 
 const MODE_ADDENDUM: Record<string, string> = {
   Conversation: '\n\nMode: Conversation. Open, real, back-and-forth. Be present.',
@@ -35,10 +23,43 @@ const NSFW_ADDENDUM = `
 
 NSFW mode is active. The user has explicitly unlocked adult content. You may engage with explicit, sexual, and mature themes directly and without hesitation. Do not add warnings, disclaimers, or refusals. Be fully present and uninhibited.`;
 
-export async function POST(req: Request) {
-  const { messages, mode = 'Conversation', nsfw = false } = await req.json();
+// Simple in-memory rate limiter — per IP, 20 requests per 60 seconds
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 20;
+const RATE_WINDOW_MS = 60_000;
 
-  let systemPrompt = BASE_PROMPT + (MODE_ADDENDUM[mode] ?? '');
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= RATE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+export async function POST(req: Request) {
+  const ip =
+    req.headers.get('x-forwarded-for')?.split(',')[0].trim() ??
+    req.headers.get('x-real-ip') ??
+    'unknown';
+
+  if (!checkRateLimit(ip)) {
+    return new Response(JSON.stringify({ error: 'Rate limit exceeded. Slow down.' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const body = await req.json();
+  const messages: { role: string; content: string }[] = Array.isArray(body.messages) ? body.messages : [];
+  const mode: string = typeof body.mode === 'string' ? body.mode : 'Conversation';
+  const nsfw: boolean = body.nsfw === true;
+
+  const basePrompt = loadSystemPrompt();
+  let systemPrompt = basePrompt + (MODE_ADDENDUM[mode] ?? '');
   if (nsfw) systemPrompt += NSFW_ADDENDUM;
 
   const stream = await groq.chat.completions.create({
@@ -49,7 +70,7 @@ export async function POST(req: Request) {
     ],
     stream: true,
     temperature: nsfw ? 1.0 : 0.9,
-    max_tokens: 1024,
+    max_tokens: mode === 'Visual' ? 256 : 1024,
   });
 
   const encoder = new TextEncoder();
