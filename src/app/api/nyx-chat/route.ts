@@ -1,10 +1,10 @@
 import Groq from 'groq-sdk';
+import type { ChatCompletionMessageParam } from 'groq-sdk/resources/chat/completions';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Single source of truth — reads from prompts/system.md at runtime
 function loadSystemPrompt(): string {
   try {
     return readFileSync(join(process.cwd(), 'prompts', 'system.md'), 'utf-8');
@@ -54,9 +54,17 @@ export async function POST(req: Request) {
   }
 
   const body = await req.json();
-  const messages: { role: string; content: string }[] = Array.isArray(body.messages) ? body.messages : [];
+  const rawMessages: { role: string; content: string }[] = Array.isArray(body.messages) ? body.messages : [];
   const mode: string = typeof body.mode === 'string' ? body.mode : 'Conversation';
   const nsfw: boolean = body.nsfw === true;
+
+  // Cast to valid Groq message types — only allow 'user' and 'assistant' from client
+  const messages: ChatCompletionMessageParam[] = rawMessages
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }));
 
   const basePrompt = loadSystemPrompt();
   let systemPrompt = basePrompt + (MODE_ADDENDUM[mode] ?? '');
