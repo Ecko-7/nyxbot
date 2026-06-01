@@ -8,22 +8,20 @@ async function generateImage(prompt: string, nsfw: boolean): Promise<{ url?: str
   const token = process.env.NEXT_PUBLIC_HF_TOKEN;
   if (!token) return { error: 'HF token not configured' };
 
-  // wavespeed supports FLUX.1-dev on free HF credits
-  const model = 'black-forest-labs/FLUX.1-dev';
-  const provider = 'wavespeed';
-
   const enhancedPrompt = nsfw
     ? `${prompt}, explicit, uncensored, nsfw`
     : prompt;
 
   try {
+    // Use the original api-inference endpoint with sd-2-1 — this worked
     const res = await fetch(
-      `https://router.huggingface.co/${provider}/models/${model}`,
+      'https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2-1',
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
+          'X-Wait-For-Model': 'true',
         },
         body: JSON.stringify({ inputs: enhancedPrompt }),
       }
@@ -31,7 +29,7 @@ async function generateImage(prompt: string, nsfw: boolean): Promise<{ url?: str
 
     if (!res.ok) {
       const text = await res.text();
-      return { error: `${provider} ${res.status}: ${text.slice(0, 160)}` };
+      return { error: `${res.status}: ${text.slice(0, 160)}` };
     }
 
     const blob = await res.blob();
