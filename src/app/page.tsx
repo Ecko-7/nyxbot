@@ -4,10 +4,18 @@ import { useState, useRef, useEffect } from 'react';
 type Message = { role: 'user' | 'nyx'; content: string; image?: string; imageError?: boolean };
 type Mode = 'Conversation' | 'Roleplay' | 'Visual';
 
+const STORAGE_KEY = 'nyx_conversation';
+const TITLE_KEY = 'nyx_conversation_title';
+const GREETING: Message = { role: 'nyx', content: 'You took long enough. Come here and tell me what we\'re making.' };
+
+function generateTitle(firstUserMessage: string): string {
+  const trimmed = firstUserMessage.trim();
+  return trimmed.length > 48 ? trimmed.slice(0, 48) + '…' : trimmed;
+}
+
 export default function NyxBot() {
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'nyx', content: 'You took long enough. Come here and tell me what we\'re making.' },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([GREETING]);
+  const [conversationTitle, setConversationTitle] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<Mode>('Conversation');
@@ -18,14 +26,46 @@ export default function NyxBot() {
   const [showPassphraseBox, setShowPassphraseBox] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  // Restore conversation from localStorage on mount
   useEffect(() => {
-    const stored = sessionStorage.getItem('nyx_nsfw_unlocked');
-    if (stored === 'true') setNsfwUnlocked(true);
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed: Message[] = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+        }
+      }
+      const storedTitle = localStorage.getItem(TITLE_KEY);
+      if (storedTitle) setConversationTitle(storedTitle);
+    } catch {}
+
+    const nsfwStored = sessionStorage.getItem('nyx_nsfw_unlocked');
+    if (nsfwStored === 'true') setNsfwUnlocked(true);
   }, []);
+
+  // Persist messages to localStorage whenever they change
+  useEffect(() => {
+    if (messages.length <= 1) return; // don\'t persist bare greeting
+    try {
+      // Strip base64 images before persisting to keep storage lean
+      const lean = messages.map(m =>
+        m.image ? { ...m, image: undefined } : m
+      );
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(lean));
+    } catch {}
+  }, [messages]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
+
+  const clearConversation = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(TITLE_KEY);
+    setMessages([GREETING]);
+    setConversationTitle(null);
+  };
 
   const handleNsfwToggleClick = () => {
     if (nsfwUnlocked) {
@@ -54,9 +94,19 @@ export default function NyxBot() {
     if (!text || loading) return;
     setInput('');
     const userMsg: Message = { role: 'user', content: text };
-    setMessages(prev => [...prev, userMsg]);
-    setLoading(true);
 
+    // Auto-generate title from first user message
+    setMessages(prev => {
+      const isFirstUserMsg = !prev.some(m => m.role === 'user');
+      if (isFirstUserMsg) {
+        const title = generateTitle(text);
+        setConversationTitle(title);
+        try { localStorage.setItem(TITLE_KEY, title); } catch {}
+      }
+      return [...prev, userMsg];
+    });
+
+    setLoading(true);
     const nyxPlaceholder: Message = { role: 'nyx', content: '' };
     setMessages(prev => [...prev, nyxPlaceholder]);
 
@@ -202,9 +252,25 @@ export default function NyxBot() {
           </div>
         </div>
 
+        {/* Profile / Memory panel */}
         <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
-          <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Profile</strong>
-          <p style={{ color: 'var(--muted)', marginTop: '10px', fontSize: '0.875rem', lineHeight: 1.6 }}>Memory and continuity coming soon.</p>
+          <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Memory</strong>
+          {conversationTitle ? (
+            <div style={{ marginTop: '10px' }}>
+              <p style={{ color: 'var(--text)', fontSize: '0.875rem', lineHeight: 1.5, marginBottom: '10px', fontStyle: 'italic' }}>
+                &ldquo;{conversationTitle}&rdquo;
+              </p>
+              <button onClick={clearConversation} style={{
+                width: '100%', padding: '8px 12px', borderRadius: '10px',
+                border: '1px solid rgba(255,80,80,0.3)',
+                background: 'rgba(255,80,80,0.08)',
+                color: 'rgba(255,120,120,0.9)', cursor: 'pointer',
+                fontSize: '0.8rem', transition: 'all 0.15s',
+              }}>✕ Clear conversation</button>
+            </div>
+          ) : (
+            <p style={{ color: 'var(--muted)', marginTop: '10px', fontSize: '0.875rem', lineHeight: 1.6 }}>Conversation will persist across sessions.</p>
+          )}
         </div>
       </aside>
 
