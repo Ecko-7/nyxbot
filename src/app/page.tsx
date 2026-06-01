@@ -1,7 +1,7 @@
 'use client';
 import { useState, useRef, useEffect } from 'react';
 
-type Message = { role: 'user' | 'nyx'; content: string; image?: string; imageError?: boolean };
+type Message = { role: 'user' | 'nyx'; content: string; image?: string; imageError?: string };
 type Mode = 'Conversation' | 'Roleplay' | 'Visual';
 
 const STORAGE_KEY = 'nyx_conversation';
@@ -10,7 +10,7 @@ const GREETING: Message = { role: 'nyx', content: 'You took long enough. Come he
 
 function generateTitle(firstUserMessage: string): string {
   const trimmed = firstUserMessage.trim();
-  return trimmed.length > 48 ? trimmed.slice(0, 48) + '…' : trimmed;
+  return trimmed.length > 48 ? trimmed.slice(0, 48) + '\u2026' : trimmed;
 }
 
 export default function NyxBot() {
@@ -18,6 +18,7 @@ export default function NyxBot() {
   const [conversationTitle, setConversationTitle] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [imageLoading, setImageLoading] = useState(false);
   const [mode, setMode] = useState<Mode>('Conversation');
   const [nsfw, setNsfw] = useState(false);
   const [nsfwUnlocked, setNsfwUnlocked] = useState(false);
@@ -26,39 +27,31 @@ export default function NyxBot() {
   const [showPassphraseBox, setShowPassphraseBox] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Restore conversation from localStorage on mount
   useEffect(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed: Message[] = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed);
-        }
+        if (Array.isArray(parsed) && parsed.length > 0) setMessages(parsed);
       }
       const storedTitle = localStorage.getItem(TITLE_KEY);
       if (storedTitle) setConversationTitle(storedTitle);
     } catch {}
-
     const nsfwStored = sessionStorage.getItem('nyx_nsfw_unlocked');
     if (nsfwStored === 'true') setNsfwUnlocked(true);
   }, []);
 
-  // Persist messages to localStorage whenever they change
   useEffect(() => {
-    if (messages.length <= 1) return; // don\'t persist bare greeting
+    if (messages.length <= 1) return;
     try {
-      // Strip base64 images before persisting to keep storage lean
-      const lean = messages.map(m =>
-        m.image ? { ...m, image: undefined } : m
-      );
+      const lean = messages.map(m => m.image ? { ...m, image: undefined } : m);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(lean));
     } catch {}
   }, [messages]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+  }, [messages, loading, imageLoading]);
 
   const clearConversation = () => {
     localStorage.removeItem(STORAGE_KEY);
@@ -68,21 +61,15 @@ export default function NyxBot() {
   };
 
   const handleNsfwToggleClick = () => {
-    if (nsfwUnlocked) {
-      setNsfw(prev => !prev);
-    } else {
-      setShowPassphraseBox(true);
-    }
+    if (nsfwUnlocked) setNsfw(prev => !prev);
+    else setShowPassphraseBox(true);
   };
 
   const submitPassphrase = () => {
     const correct = process.env.NEXT_PUBLIC_NYX_PASSPHRASE;
     if (passphraseInput === correct) {
-      setNsfwUnlocked(true);
-      setNsfw(true);
-      setShowPassphraseBox(false);
-      setPassphraseInput('');
-      setPassphraseError(false);
+      setNsfwUnlocked(true); setNsfw(true);
+      setShowPassphraseBox(false); setPassphraseInput(''); setPassphraseError(false);
       sessionStorage.setItem('nyx_nsfw_unlocked', 'true');
     } else {
       setPassphraseError(true);
@@ -95,7 +82,6 @@ export default function NyxBot() {
     setInput('');
     const userMsg: Message = { role: 'user', content: text };
 
-    // Auto-generate title from first user message
     setMessages(prev => {
       const isFirstUserMsg = !prev.some(m => m.role === 'user');
       if (isFirstUserMsg) {
@@ -107,16 +93,24 @@ export default function NyxBot() {
     });
 
     setLoading(true);
+    if (mode === 'Visual') setImageLoading(true);
     const nyxPlaceholder: Message = { role: 'nyx', content: '' };
     setMessages(prev => [...prev, nyxPlaceholder]);
 
     try {
+      // Fire image request in parallel with chat stream
       const imagePromise = mode === 'Visual'
         ? fetch('/api/nyx-image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt: text, nsfw }),
-          }).then(r => r.json()).then(d => d.image ?? null).catch(() => null)
+          })
+          .then(r => r.json())
+          .then(d => {
+            if (d.error) return { error: d.error as string };
+            return { image: d.image as string };
+          })
+          .catch(e => ({ error: String(e) }))
         : Promise.resolve(null);
 
       const res = await fetch('/api/nyx-chat', {
@@ -141,8 +135,7 @@ export default function NyxBot() {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-        for (const line of lines) {
+        for (const line of chunk.split('\n')) {
           if (line.startsWith('data: ')) {
             const data = line.slice(6);
             if (data === '[DONE]') break;
@@ -160,32 +153,42 @@ export default function NyxBot() {
         }
       }
 
+      setLoading(false);
+
+      // Await image result after chat stream completes
       if (mode === 'Visual') {
-        const img = await imagePromise;
-        if (img) {
+        const imgResult = await imagePromise;
+        setImageLoading(false);
+        if (imgResult && 'image' in imgResult && imgResult.image) {
           setMessages(prev => {
             const updated = [...prev];
-            updated[updated.length - 1] = { ...updated[updated.length - 1], image: img };
+            updated[updated.length - 1] = { ...updated[updated.length - 1], image: imgResult.image };
+            return updated;
+          });
+        } else if (imgResult && 'error' in imgResult) {
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { ...updated[updated.length - 1], imageError: imgResult.error };
             return updated;
           });
         }
       }
     } catch {
+      setLoading(false);
+      setImageLoading(false);
       setMessages(prev => {
         const updated = [...prev];
-        updated[updated.length - 1] = { role: 'nyx', content: 'Something broke. Try again. 🖤' };
+        updated[updated.length - 1] = { role: 'nyx', content: 'Something broke. Try again. \ud83d\udda4' };
         return updated;
       });
     } finally {
       setLoading(false);
+      setImageLoading(false);
     }
   };
 
   const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
   return (
@@ -227,7 +230,7 @@ export default function NyxBot() {
               textAlign: 'left', cursor: 'pointer',
               fontWeight: nsfw ? 600 : 400, transition: 'all 0.15s', fontSize: '0.9rem',
             }}>
-              {nsfw ? '🔓 NSFW On' : '🔒 NSFW Off'}
+              {nsfw ? '\ud83d\udd13 NSFW On' : '\ud83d\udd12 NSFW Off'}
             </button>
             {showPassphraseBox && (
               <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -252,7 +255,6 @@ export default function NyxBot() {
           </div>
         </div>
 
-        {/* Profile / Memory panel */}
         <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Memory</strong>
           {conversationTitle ? (
@@ -262,10 +264,8 @@ export default function NyxBot() {
               </p>
               <button onClick={clearConversation} style={{
                 width: '100%', padding: '8px 12px', borderRadius: '10px',
-                border: '1px solid rgba(255,80,80,0.3)',
-                background: 'rgba(255,80,80,0.08)',
-                color: 'rgba(255,120,120,0.9)', cursor: 'pointer',
-                fontSize: '0.8rem', transition: 'all 0.15s',
+                border: '1px solid rgba(255,80,80,0.3)', background: 'rgba(255,80,80,0.08)',
+                color: 'rgba(255,120,120,0.9)', cursor: 'pointer', fontSize: '0.8rem', transition: 'all 0.15s',
               }}>✕ Clear conversation</button>
             </div>
           ) : (
@@ -278,14 +278,14 @@ export default function NyxBot() {
         <header style={{ padding: '20px 28px', borderBottom: '1px solid var(--line)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <h1 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '4px' }}>NyxBot</h1>
-            <p style={{ color: 'var(--muted)', fontSize: '0.875rem' }}>Mode: {mode}{nsfw ? ' · NSFW' : ''}</p>
+            <p style={{ color: 'var(--muted)', fontSize: '0.875rem' }}>Mode: {mode}{nsfw ? ' \u00b7 NSFW' : ''}</p>
           </div>
           <div style={{
             padding: '6px 14px', borderRadius: '999px',
             background: nsfw ? 'rgba(255,94,168,0.15)' : 'rgba(168,70,255,0.15)',
             border: `1px solid ${nsfw ? 'rgba(255,94,168,0.3)' : 'rgba(168,70,255,0.3)'}`,
             fontSize: '0.75rem', color: nsfw ? '#ffb3d9' : '#d8a8ff',
-          }}>● Live</div>
+          }}>{imageLoading ? '\u2726 generating...' : '\u25cf Live'}</div>
         </header>
 
         <section style={{ padding: '24px 28px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -303,8 +303,29 @@ export default function NyxBot() {
                   style={{ width: '100%', maxWidth: '540px', display: 'block', borderRadius: '16px 16px 0 0' }}
                 />
               )}
+              {!msg.image && msg.imageError && (
+                <div style={{
+                  padding: '12px 18px', fontSize: '0.8rem',
+                  color: 'rgba(255,120,120,0.8)',
+                  borderBottom: '1px solid var(--line)',
+                  background: 'rgba(255,80,80,0.06)',
+                }}>
+                  \u26a0\ufe0f Image generation failed: {msg.imageError}
+                </div>
+              )}
+              {imageLoading && i === messages.length - 1 && mode === 'Visual' && !msg.image && !msg.imageError && (
+                <div style={{
+                  padding: '24px 18px', fontSize: '0.875rem',
+                  color: 'var(--muted)', borderBottom: '1px solid var(--line)',
+                  background: 'rgba(168,70,255,0.06)',
+                  display: 'flex', alignItems: 'center', gap: '10px',
+                }}>
+                  <span style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>\u2726</span>
+                  Creating image...
+                </div>
+              )}
               <div style={{ padding: '14px 18px', lineHeight: 1.65, fontSize: '0.95rem', whiteSpace: 'pre-wrap' }}>
-                {msg.content || (loading && i === messages.length - 1 ? '✦ creating...' : '')}
+                {msg.content || (loading && i === messages.length - 1 ? '\u2726 thinking...' : '')}
               </div>
             </div>
           ))}
@@ -331,7 +352,7 @@ export default function NyxBot() {
             cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
             transition: 'all 0.15s', whiteSpace: 'nowrap',
           }}>
-            {loading ? (mode === 'Visual' ? '✦ creating...' : '...') : 'Send'}
+            {loading ? (mode === 'Visual' ? '\u2726 creating...' : '...') : 'Send'}
           </button>
         </div>
       </main>

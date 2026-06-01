@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
-export const maxDuration = 30;
+export const maxDuration = 60; // FLUX cold starts can take 35-50s on free HF tier
 
-// Simple in-memory rate limiter — per IP, 10 image requests per 60 seconds
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = 10;
 const RATE_WINDOW_MS = 60_000;
@@ -20,11 +19,36 @@ function checkRateLimit(ip: string): boolean {
   return true;
 }
 
-// Enrich prompt with artistic quality terms for better FLUX output
 function enhancePrompt(prompt: string, nsfw: boolean): string {
   const qualityTags = 'cinematic lighting, ultra detailed, high quality, 8k';
   const nsfwTags = nsfw ? ', explicit, uncensored, nsfw' : ', safe for work';
   return `${prompt}, ${qualityTags}${nsfwTags}`;
+}
+
+async function fetchImage(prompt: string, hfToken: string, attempt = 1): Promise<Response> {
+  const res = await fetch(
+    'https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${hfToken}`,
+        'Content-Type': 'application/json',
+        'X-Wait-For-Model': 'true',
+      },
+      body: JSON.stringify({
+        inputs: prompt,
+        parameters: { num_inference_steps: 4, guidance_scale: 0 },
+      }),
+    }
+  );
+
+  // HF returns 503 while model loads — retry once after a short wait
+  if (res.status === 503 && attempt < 3) {
+    await new Promise(r => setTimeout(r, 6000));
+    return fetchImage(prompt, hfToken, attempt + 1);
+  }
+
+  return res;
 }
 
 export async function POST(req: NextRequest) {
@@ -48,33 +72,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'HF_TOKEN not set' }, { status: 500 });
   }
 
-  const enhancedPrompt = enhancePrompt(prompt, nsfw);
-
   try {
-    // FLUX.1-schnell — significantly better quality than SD 2.1, fast inference
-    const response = await fetch(
-      'https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${hfToken}`,
-          'Content-Type': 'application/json',
-          'X-Wait-For-Model': 'true',
-        },
-        body: JSON.stringify({
-          inputs: enhancedPrompt,
-          parameters: {
-            num_inference_steps: 4,   // schnell is optimized for 4 steps
-            guidance_scale: 0,         // schnell uses guidance_scale 0
-          },
-        }),
-      }
-    );
+    const response = await fetchImage(enhancePrompt(prompt, nsfw), hfToken);
 
     if (!response.ok) {
       const err = await response.text();
       return NextResponse.json(
-        { error: `HF ${response.status}: ${err.slice(0, 160)}` },
+        { error: `Image generation failed (${response.status}): ${err.slice(0, 200)}` },
         { status: response.status }
       );
     }
