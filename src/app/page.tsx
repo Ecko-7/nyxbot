@@ -4,41 +4,6 @@ import { useState, useRef, useEffect } from 'react';
 type Message = { role: 'user' | 'nyx'; content: string; image?: string; imageError?: boolean };
 type Mode = 'Conversation' | 'Roleplay' | 'Visual';
 
-async function generateImage(prompt: string, nsfw: boolean): Promise<{ url?: string; error?: string }> {
-  const token = process.env.NEXT_PUBLIC_HF_TOKEN;
-  if (!token) return { error: 'HF token not configured' };
-
-  const enhancedPrompt = nsfw
-    ? `${prompt}, explicit, uncensored, nsfw`
-    : prompt;
-
-  try {
-    // Use the original api-inference endpoint with sd-2-1 — this worked
-    const res = await fetch(
-      'https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2-1',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'X-Wait-For-Model': 'true',
-        },
-        body: JSON.stringify({ inputs: enhancedPrompt }),
-      }
-    );
-
-    if (!res.ok) {
-      const text = await res.text();
-      return { error: `${res.status}: ${text.slice(0, 160)}` };
-    }
-
-    const blob = await res.blob();
-    return { url: URL.createObjectURL(blob) };
-  } catch (e) {
-    return { error: String(e) };
-  }
-}
-
 export default function NyxBot() {
   const [messages, setMessages] = useState<Message[]>([
     { role: 'nyx', content: 'You took long enough. Come here and tell me what we\'re making.' },
@@ -97,7 +62,11 @@ export default function NyxBot() {
 
     try {
       const imagePromise = mode === 'Visual'
-        ? generateImage(text, nsfw)
+        ? fetch('/api/nyx-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: text, nsfw }),
+          }).then(r => r.json()).then(d => d.image ?? null).catch(() => null)
         : Promise.resolve(null);
 
       const res = await fetch('/api/nyx-chat', {
@@ -142,21 +111,11 @@ export default function NyxBot() {
       }
 
       if (mode === 'Visual') {
-        const result = await imagePromise;
-        if (result?.url) {
+        const img = await imagePromise;
+        if (img) {
           setMessages(prev => {
             const updated = [...prev];
-            updated[updated.length - 1] = { ...updated[updated.length - 1], image: result.url };
-            return updated;
-          });
-        } else if (result?.error) {
-          setMessages(prev => {
-            const updated = [...prev];
-            updated[updated.length - 1] = {
-              ...updated[updated.length - 1],
-              imageError: true,
-              content: updated[updated.length - 1].content + `\n\n⚠️ Image failed: ${result.error}`,
-            };
+            updated[updated.length - 1] = { ...updated[updated.length - 1], image: img };
             return updated;
           });
         }
