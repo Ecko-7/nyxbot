@@ -25,7 +25,6 @@ export default function NyxBot() {
   const [passphraseInput, setPassphraseInput] = useState('');
   const [passphraseError, setPassphraseError] = useState(false);
   const [showPassphraseBox, setShowPassphraseBox] = useState(false);
-  // Voice state
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
@@ -107,9 +106,7 @@ export default function NyxBot() {
           fd.append('audio', blob, 'audio.webm');
           const res = await fetch('/api/nyx-stt', { method: 'POST', body: fd });
           const data = await res.json();
-          if (data.text) {
-            setInput(data.text.trim());
-          }
+          if (data.text) setInput(data.text.trim());
         } catch {}
         setTranscribing(false);
       };
@@ -160,8 +157,7 @@ export default function NyxBot() {
 
     setLoading(true);
     if (mode === 'Visual') setImageLoading(true);
-    const nyxPlaceholder: Message = { role: 'nyx', content: '' };
-    setMessages(prev => [...prev, nyxPlaceholder]);
+    setMessages(prev => [...prev, { role: 'nyx', content: '' }]);
 
     try {
       const imagePromise = mode === 'Visual'
@@ -209,8 +205,6 @@ export default function NyxBot() {
       }
 
       setLoading(false);
-
-      // Speak Nyx's response if voice is on
       if (voiceEnabled && full) speakText(full);
 
       if (mode === 'Visual') {
@@ -258,7 +252,6 @@ export default function NyxBot() {
           </div>
         </div>
 
-        {/* Voice panel */}
         <div style={{ background: 'var(--panel)', border: `1px solid ${voiceEnabled ? 'rgba(168,70,255,0.4)' : 'var(--line)'}`, borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Voice</strong>
           <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -363,16 +356,15 @@ export default function NyxBot() {
             rows={2} disabled={transcribing}
             style={{ width: '100%', resize: 'vertical', background: 'var(--panel)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: '14px', padding: '14px 16px', fontFamily: 'inherit', fontSize: '0.95rem', lineHeight: 1.5 }}
           />
-          {/* Mic button */}
           <button
             onMouseDown={startRecording} onMouseUp={stopRecording}
             onTouchStart={startRecording} onTouchEnd={stopRecording}
             disabled={loading || transcribing}
             title="Hold to speak"
             style={{
-              padding: '14px 16px', border: 'none', borderRadius: '14px',
-              background: recording ? 'rgba(255,80,80,0.4)' : transcribing ? 'rgba(168,70,255,0.2)' : 'var(--panel)',
+              padding: '14px 16px', borderRadius: '14px',
               border: `1px solid ${recording ? 'rgba(255,80,80,0.6)' : 'var(--line)'}`,
+              background: recording ? 'rgba(255,80,80,0.4)' : transcribing ? 'rgba(168,70,255,0.2)' : 'var(--panel)',
               color: recording ? 'rgba(255,120,120,0.9)' : 'var(--muted)',
               cursor: loading || transcribing ? 'not-allowed' : 'pointer',
               fontSize: '1.1rem', transition: 'all 0.15s', whiteSpace: 'nowrap',
