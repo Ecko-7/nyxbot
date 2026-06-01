@@ -4,6 +4,32 @@ import { useState, useRef, useEffect } from 'react';
 type Message = { role: 'user' | 'nyx'; content: string; image?: string };
 type Mode = 'Conversation' | 'Roleplay' | 'Visual';
 
+async function generateImage(prompt: string, nsfw: boolean): Promise<string | null> {
+  const token = process.env.NEXT_PUBLIC_HF_TOKEN;
+  if (!token) return null;
+
+  const model = nsfw
+    ? 'enhanceaiteam/Flux-uncensored'
+    : 'stabilityai/stable-diffusion-xl-base-1.0';
+
+  try {
+    const res = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'X-Wait-For-Model': 'true',
+      },
+      body: JSON.stringify({ inputs: prompt }),
+    });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
 export default function NyxBot() {
   const [messages, setMessages] = useState<Message[]>([
     { role: 'nyx', content: 'You took long enough. Come here and tell me what we\'re making.' },
@@ -61,18 +87,10 @@ export default function NyxBot() {
     setMessages(prev => [...prev, nyxPlaceholder]);
 
     try {
-      // Visual mode: generate image in parallel with text
-      let imagePromise: Promise<string | null> = Promise.resolve(null);
-      if (mode === 'Visual') {
-        imagePromise = fetch('/api/nyx-image', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: text, nsfw }),
-        })
-          .then(r => r.json())
-          .then(d => d.image ?? null)
-          .catch(() => null);
-      }
+      // Fire image gen and chat in parallel
+      const imagePromise = mode === 'Visual'
+        ? generateImage(text, nsfw)
+        : Promise.resolve(null);
 
       const res = await fetch('/api/nyx-chat', {
         method: 'POST',
@@ -162,7 +180,6 @@ export default function NyxBot() {
           <div style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>Voice, image, dream, intimacy layer</div>
         </div>
 
-        {/* Mode */}
         <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Mode</strong>
           <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -186,7 +203,6 @@ export default function NyxBot() {
           </div>
         </div>
 
-        {/* NSFW */}
         <div style={{ background: 'var(--panel)', border: `1px solid ${nsfw ? 'rgba(255,94,168,0.4)' : 'var(--line)'}`, borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Content</strong>
           <div style={{ marginTop: '12px' }}>
@@ -240,7 +256,6 @@ export default function NyxBot() {
           </div>
         </div>
 
-        {/* Profile */}
         <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Profile</strong>
           <p style={{ color: 'var(--muted)', marginTop: '10px', fontSize: '0.875rem', lineHeight: 1.6 }}>
@@ -251,8 +266,6 @@ export default function NyxBot() {
 
       {/* Main */}
       <main style={{ display: 'grid', gridTemplateRows: 'auto 1fr auto', minHeight: '100vh' }}>
-
-        {/* Header */}
         <header style={{
           padding: '20px 28px',
           borderBottom: '1px solid var(--line)',
@@ -274,7 +287,6 @@ export default function NyxBot() {
           }}>● Live</div>
         </header>
 
-        {/* Chat */}
         <section style={{ padding: '24px 28px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {messages.map((msg, i) => (
             <div
@@ -298,14 +310,13 @@ export default function NyxBot() {
                 />
               )}
               <div style={{ padding: '14px 18px', lineHeight: 1.65, fontSize: '0.95rem', whiteSpace: 'pre-wrap' }}>
-                {msg.content || (loading && i === messages.length - 1 ? '...' : '')}
+                {msg.content || (loading && i === messages.length - 1 ? '✦ creating...' : '')}
               </div>
             </div>
           ))}
           <div ref={bottomRef} />
         </section>
 
-        {/* Composer */}
         <div style={{
           padding: '16px 28px 24px',
           borderTop: '1px solid var(--line)',
