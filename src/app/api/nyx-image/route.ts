@@ -19,38 +19,8 @@ function checkRateLimit(ip: string): boolean {
   return true;
 }
 
-function enhancePrompt(prompt: string, nsfw: boolean): string {
-  const qualityTags = 'cinematic lighting, ultra detailed, high quality';
-  const nsfwTags = nsfw ? ', explicit, uncensored, nsfw' : '';
-  return `${prompt}, ${qualityTags}${nsfwTags}`;
-}
-
-// Model waterfall: try each in order until one succeeds
-const MODELS = [
-  'stabilityai/stable-diffusion-xl-base-1.0',  // SDXL — free tier, high quality
-  'runwayml/stable-diffusion-v1-5',              // SD 1.5 — reliable fallback
-];
-
-async function fetchFromModel(model: string, prompt: string, hfToken: string, attempt = 1): Promise<Response> {
-  const res = await fetch(
-    `https://api-inference.huggingface.co/models/${model}`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${hfToken}`,
-        'Content-Type': 'application/json',
-        'X-Wait-For-Model': 'true',
-      },
-      body: JSON.stringify({ inputs: prompt }),
-    }
-  );
-
-  if (res.status === 503 && attempt < 3) {
-    await new Promise(r => setTimeout(r, 8000));
-    return fetchFromModel(model, prompt, hfToken, attempt + 1);
-  }
-
-  return res;
+function enhancePrompt(prompt: string): string {
+  return `${prompt.trim()}, cinematic lighting, ultra detailed, high quality`;
 }
 
 export async function POST(req: NextRequest) {
@@ -63,48 +33,44 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Rate limit exceeded. Slow down.' }, { status: 429 });
   }
 
-  const { prompt, nsfw } = await req.json();
+  const { prompt } = await req.json();
 
   if (!prompt || typeof prompt !== 'string') {
     return NextResponse.json({ error: 'Invalid prompt.' }, { status: 400 });
   }
 
-  const hfToken = process.env.HF_TOKEN;
-  if (!hfToken) {
-    return NextResponse.json({ error: 'HF_TOKEN not set' }, { status: 500 });
-  }
+  try {
+    const encoded = encodeURIComponent(enhancePrompt(prompt));
+    // Pollinations: free, no token, returns image directly
+    // seed=-1 = random each time, width/height for good aspect ratio
+    const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=-1&nologo=true`;
 
-  const enhancedPrompt = enhancePrompt(prompt, nsfw);
-  let lastError = 'All image models failed.';
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'NyxBot/1.0' },
+    });
 
-  for (const model of MODELS) {
-    try {
-      const response = await fetchFromModel(model, enhancedPrompt, hfToken);
-
-      if (!response.ok) {
-        const errText = await response.text();
-        lastError = `${model} → ${response.status}: ${errText.slice(0, 160)}`;
-        continue; // try next model
-      }
-
-      const imageBuffer = await response.arrayBuffer();
-
-      // HF sometimes returns JSON error with 200 status — guard against it
-      const contentType = response.headers.get('content-type') ?? '';
-      if (!contentType.startsWith('image/')) {
-        const text = Buffer.from(imageBuffer).toString('utf-8');
-        lastError = `${model} → unexpected response: ${text.slice(0, 160)}`;
-        continue;
-      }
-
-      const base64 = Buffer.from(imageBuffer).toString('base64');
-      return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
-
-    } catch (e) {
-      lastError = `${model} → ${String(e)}`;
-      continue;
+    if (!response.ok) {
+      const errText = await response.text();
+      return NextResponse.json(
+        { error: `Image generation failed (${response.status}): ${errText.slice(0, 200)}` },
+        { status: response.status }
+      );
     }
-  }
 
-  return NextResponse.json({ error: lastError }, { status: 503 });
+    const contentType = response.headers.get('content-type') ?? 'image/jpeg';
+    if (!contentType.startsWith('image/')) {
+      const text = await response.text();
+      return NextResponse.json(
+        { error: `Unexpected response: ${text.slice(0, 200)}` },
+        { status: 502 }
+      );
+    }
+
+    const imageBuffer = await response.arrayBuffer();
+    const base64 = Buffer.from(imageBuffer).toString('base64');
+
+    return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
+  } catch (e) {
+    return NextResponse.json({ error: String(e) }, { status: 500 });
+  }
 }
