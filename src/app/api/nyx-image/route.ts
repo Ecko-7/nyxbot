@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60; // FLUX cold starts can take 35-50s on free HF tier
+export const maxDuration = 60;
 
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = 10;
@@ -20,14 +20,20 @@ function checkRateLimit(ip: string): boolean {
 }
 
 function enhancePrompt(prompt: string, nsfw: boolean): string {
-  const qualityTags = 'cinematic lighting, ultra detailed, high quality, 8k';
-  const nsfwTags = nsfw ? ', explicit, uncensored, nsfw' : ', safe for work';
+  const qualityTags = 'cinematic lighting, ultra detailed, high quality';
+  const nsfwTags = nsfw ? ', explicit, uncensored, nsfw' : '';
   return `${prompt}, ${qualityTags}${nsfwTags}`;
 }
 
-async function fetchImage(prompt: string, hfToken: string, attempt = 1): Promise<Response> {
+// Model waterfall: try each in order until one succeeds
+const MODELS = [
+  'stabilityai/stable-diffusion-xl-base-1.0',  // SDXL — free tier, high quality
+  'runwayml/stable-diffusion-v1-5',              // SD 1.5 — reliable fallback
+];
+
+async function fetchFromModel(model: string, prompt: string, hfToken: string, attempt = 1): Promise<Response> {
   const res = await fetch(
-    'https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell',
+    `https://api-inference.huggingface.co/models/${model}`,
     {
       method: 'POST',
       headers: {
@@ -35,17 +41,13 @@ async function fetchImage(prompt: string, hfToken: string, attempt = 1): Promise
         'Content-Type': 'application/json',
         'X-Wait-For-Model': 'true',
       },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: { num_inference_steps: 4, guidance_scale: 0 },
-      }),
+      body: JSON.stringify({ inputs: prompt }),
     }
   );
 
-  // HF returns 503 while model loads — retry once after a short wait
   if (res.status === 503 && attempt < 3) {
-    await new Promise(r => setTimeout(r, 6000));
-    return fetchImage(prompt, hfToken, attempt + 1);
+    await new Promise(r => setTimeout(r, 8000));
+    return fetchFromModel(model, prompt, hfToken, attempt + 1);
   }
 
   return res;
@@ -72,23 +74,37 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'HF_TOKEN not set' }, { status: 500 });
   }
 
-  try {
-    const response = await fetchImage(enhancePrompt(prompt, nsfw), hfToken);
+  const enhancedPrompt = enhancePrompt(prompt, nsfw);
+  let lastError = 'All image models failed.';
 
-    if (!response.ok) {
-      const err = await response.text();
-      return NextResponse.json(
-        { error: `Image generation failed (${response.status}): ${err.slice(0, 200)}` },
-        { status: response.status }
-      );
+  for (const model of MODELS) {
+    try {
+      const response = await fetchFromModel(model, enhancedPrompt, hfToken);
+
+      if (!response.ok) {
+        const errText = await response.text();
+        lastError = `${model} → ${response.status}: ${errText.slice(0, 160)}`;
+        continue; // try next model
+      }
+
+      const imageBuffer = await response.arrayBuffer();
+
+      // HF sometimes returns JSON error with 200 status — guard against it
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!contentType.startsWith('image/')) {
+        const text = Buffer.from(imageBuffer).toString('utf-8');
+        lastError = `${model} → unexpected response: ${text.slice(0, 160)}`;
+        continue;
+      }
+
+      const base64 = Buffer.from(imageBuffer).toString('base64');
+      return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
+
+    } catch (e) {
+      lastError = `${model} → ${String(e)}`;
+      continue;
     }
-
-    const imageBuffer = await response.arrayBuffer();
-    const base64 = Buffer.from(imageBuffer).toString('base64');
-    const contentType = response.headers.get('content-type') ?? 'image/jpeg';
-
-    return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
-  } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
   }
+
+  return NextResponse.json({ error: lastError }, { status: 503 });
 }
