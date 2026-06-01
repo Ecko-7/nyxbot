@@ -8,10 +8,11 @@ async function generateImage(prompt: string, nsfw: boolean): Promise<{ url?: str
   const token = process.env.NEXT_PUBLIC_HF_TOKEN;
   if (!token) return { error: 'HF token not configured' };
 
-  // Use HF router endpoint — more reliable than direct model inference
+  // SD 2.1 is confirmed on hf-inference free tier
+  // For NSFW we try the uncensored model but fall back gracefully
   const model = nsfw
     ? 'enhanceaiteam/Flux-uncensored'
-    : 'black-forest-labs/FLUX.1-schnell';
+    : 'stabilityai/stable-diffusion-2-1';
 
   try {
     const res = await fetch(
@@ -28,6 +29,24 @@ async function generateImage(prompt: string, nsfw: boolean): Promise<{ url?: str
 
     if (!res.ok) {
       const text = await res.text();
+      // If NSFW model unsupported, fall back to SD 2.1
+      if (nsfw && res.status === 400) {
+        const fallback = await fetch(
+          'https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-2-1',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ inputs: prompt }),
+          }
+        );
+        if (fallback.ok) {
+          const blob = await fallback.blob();
+          return { url: URL.createObjectURL(blob) };
+        }
+      }
       return { error: `HF ${res.status}: ${text.slice(0, 120)}` };
     }
 
@@ -151,7 +170,11 @@ export default function NyxBot() {
         } else if (result?.error) {
           setMessages(prev => {
             const updated = [...prev];
-            updated[updated.length - 1] = { ...updated[updated.length - 1], imageError: true, content: updated[updated.length - 1].content + `\n\n⚠️ Image failed: ${result.error}` };
+            updated[updated.length - 1] = {
+              ...updated[updated.length - 1],
+              imageError: true,
+              content: updated[updated.length - 1].content + `\n\n⚠️ Image failed: ${result.error}`,
+            };
             return updated;
           });
         }
@@ -177,13 +200,9 @@ export default function NyxBot() {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', minHeight: '100vh' }}>
       <aside style={{
-        borderRight: '1px solid var(--line)',
-        padding: '24px',
-        background: 'rgba(0,0,0,0.18)',
-        backdropFilter: 'blur(12px)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '16px',
+        borderRight: '1px solid var(--line)', padding: '24px',
+        background: 'rgba(0,0,0,0.18)', backdropFilter: 'blur(12px)',
+        display: 'flex', flexDirection: 'column', gap: '16px',
       }}>
         <div>
           <div style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '6px' }}>NyxBot</div>
