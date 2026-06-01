@@ -1,0 +1,32 @@
+:root {
+  --bg: #111111;
+  --panel: #181818;
+  --panel-2: #1f1f1f;
+  --text: #f2eee7;
+  --muted: #b8afa3;
+  --accent: #a846ff;
+  --accent-2: #ff5ea8;
+  --line: rgba(255,255,255,0.08);
+  --radius: 16px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: Inter, system-ui, sans-serif;
+  background:
+    radial-gradient(circle at top, rgba(168,70,255,0.15), transparent 30%),
+    radial-gradient(circle at 80% 20%, rgba(255,94,168,0.12), transparent 25%),
+    var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+textarea:focus, input:focus {
+  outline: none;
+  border-color: rgba(168,70,255,0.5) !important;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
