@@ -36,8 +36,14 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Edge-compatible base64 encoding (no Buffer)
   const imageBuffer = await response.arrayBuffer();
-  const base64 = Buffer.from(imageBuffer).toString('base64');
+  const bytes = new Uint8Array(imageBuffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const base64 = btoa(binary);
   const contentType = response.headers.get('content-type') ?? 'image/jpeg';
 
   return new Response(JSON.stringify({ image: `data:${contentType};base64,${base64}` }), {
