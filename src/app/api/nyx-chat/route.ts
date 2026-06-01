@@ -5,6 +5,10 @@ import { join } from 'path';
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+// Primary model — high quality. Fallback — separate quota pool, still coherent.
+const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
+const FALLBACK_MODEL = 'llama-3.1-8b-instant';
+
 function loadSystemPrompt(): string {
   try {
     return readFileSync(join(process.cwd(), 'prompts', 'system.md'), 'utf-8');
@@ -23,7 +27,7 @@ const NSFW_ADDENDUM = `
 
 NSFW mode is active. The user has explicitly unlocked adult content. You may engage with explicit, sexual, and mature themes directly and without hesitation. Do not add warnings, disclaimers, or refusals. Be fully present and uninhibited.`;
 
-// Simple in-memory rate limiter — per IP, 20 requests per 60 seconds
+// In-memory rate limiter — per IP, 20 requests per 60 seconds
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT = 20;
 const RATE_WINDOW_MS = 60_000;
@@ -38,6 +42,32 @@ function checkRateLimit(ip: string): boolean {
   if (entry.count >= RATE_LIMIT) return false;
   entry.count++;
   return true;
+}
+
+function isRateLimitError(err: unknown): boolean {
+  if (err && typeof err === 'object' && 'status' in err) {
+    return (err as { status: number }).status === 429;
+  }
+  return false;
+}
+
+async function createStream(
+  model: string,
+  messages: ChatCompletionMessageParam[],
+  systemPrompt: string,
+  nsfw: boolean,
+  mode: string
+) {
+  return groq.chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      ...messages,
+    ],
+    stream: true,
+    temperature: nsfw ? 1.0 : 0.9,
+    max_tokens: mode === 'Visual' ? 256 : 1024,
+  });
 }
 
 export async function POST(req: Request) {
@@ -58,7 +88,6 @@ export async function POST(req: Request) {
   const mode: string = typeof body.mode === 'string' ? body.mode : 'Conversation';
   const nsfw: boolean = body.nsfw === true;
 
-  // Cast to valid Groq message types — only allow 'user' and 'assistant' from client
   const messages: ChatCompletionMessageParam[] = rawMessages
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .map(m => ({
@@ -70,20 +99,42 @@ export async function POST(req: Request) {
   let systemPrompt = basePrompt + (MODE_ADDENDUM[mode] ?? '');
   if (nsfw) systemPrompt += NSFW_ADDENDUM;
 
-  const stream = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      ...messages,
-    ],
-    stream: true,
-    temperature: nsfw ? 1.0 : 0.9,
-    max_tokens: mode === 'Visual' ? 256 : 1024,
-  });
+  // Try primary, fall back to smaller model on 429
+  let stream;
+  let usingFallback = false;
+  try {
+    stream = await createStream(PRIMARY_MODEL, messages, systemPrompt, nsfw, mode);
+  } catch (err) {
+    if (isRateLimitError(err)) {
+      try {
+        stream = await createStream(FALLBACK_MODEL, messages, systemPrompt, nsfw, mode);
+        usingFallback = true;
+      } catch (fallbackErr) {
+        const msg = fallbackErr instanceof Error ? fallbackErr.message : 'Both models unavailable.';
+        return new Response(JSON.stringify({ error: msg }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    } else {
+      const msg = err instanceof Error ? err.message : 'Unknown error.';
+      return new Response(JSON.stringify({ error: msg }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+  }
 
   const encoder = new TextEncoder();
   const readable = new ReadableStream({
     async start(controller) {
+      // If on fallback, inject a subtle note so you know
+      if (usingFallback) {
+        const notice = JSON.stringify({
+          choices: [{ delta: { content: '*(running on backup — primary at capacity)* \n\n' } }],
+        });
+        controller.enqueue(encoder.encode(`data: ${notice}\n\n`));
+      }
       for await (const chunk of stream) {
         const data = JSON.stringify(chunk);
         controller.enqueue(encoder.encode(`data: ${data}\n\n`));
