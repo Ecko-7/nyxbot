@@ -1,7 +1,7 @@
 'use client';
 import { useState, useRef, useEffect } from 'react';
 
-type Message = { role: 'user' | 'nyx'; content: string };
+type Message = { role: 'user' | 'nyx'; content: string; image?: string };
 type Mode = 'Conversation' | 'Roleplay' | 'Visual';
 
 export default function NyxBot() {
@@ -11,11 +11,43 @@ export default function NyxBot() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<Mode>('Conversation');
+  const [nsfw, setNsfw] = useState(false);
+  const [nsfwUnlocked, setNsfwUnlocked] = useState(false);
+  const [passphraseInput, setPassphraseInput] = useState('');
+  const [passphraseError, setPassphraseError] = useState(false);
+  const [showPassphraseBox, setShowPassphraseBox] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const stored = sessionStorage.getItem('nyx_nsfw_unlocked');
+    if (stored === 'true') setNsfwUnlocked(true);
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
+
+  const handleNsfwToggleClick = () => {
+    if (nsfwUnlocked) {
+      setNsfw(prev => !prev);
+    } else {
+      setShowPassphraseBox(true);
+    }
+  };
+
+  const submitPassphrase = () => {
+    const correct = process.env.NEXT_PUBLIC_NYX_PASSPHRASE;
+    if (passphraseInput === correct) {
+      setNsfwUnlocked(true);
+      setNsfw(true);
+      setShowPassphraseBox(false);
+      setPassphraseInput('');
+      setPassphraseError(false);
+      sessionStorage.setItem('nyx_nsfw_unlocked', 'true');
+    } else {
+      setPassphraseError(true);
+    }
+  };
 
   const send = async () => {
     const text = input.trim();
@@ -29,6 +61,19 @@ export default function NyxBot() {
     setMessages(prev => [...prev, nyxPlaceholder]);
 
     try {
+      // Visual mode: generate image in parallel with text
+      let imagePromise: Promise<string | null> = Promise.resolve(null);
+      if (mode === 'Visual') {
+        imagePromise = fetch('/api/nyx-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: text, nsfw }),
+        })
+          .then(r => r.json())
+          .then(d => d.image ?? null)
+          .catch(() => null);
+      }
+
       const res = await fetch('/api/nyx-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -38,6 +83,7 @@ export default function NyxBot() {
             content: m.content,
           })),
           mode,
+          nsfw,
         }),
       });
 
@@ -66,6 +112,18 @@ export default function NyxBot() {
               });
             } catch {}
           }
+        }
+      }
+
+      // Attach image once it resolves
+      if (mode === 'Visual') {
+        const img = await imagePromise;
+        if (img) {
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { ...updated[updated.length - 1], image: img };
+            return updated;
+          });
         }
       }
     } catch {
@@ -104,6 +162,7 @@ export default function NyxBot() {
           <div style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>Voice, image, dream, intimacy layer</div>
         </div>
 
+        {/* Mode */}
         <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Mode</strong>
           <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -127,6 +186,61 @@ export default function NyxBot() {
           </div>
         </div>
 
+        {/* NSFW */}
+        <div style={{ background: 'var(--panel)', border: `1px solid ${nsfw ? 'rgba(255,94,168,0.4)' : 'var(--line)'}`, borderRadius: 'var(--radius)', padding: '16px' }}>
+          <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Content</strong>
+          <div style={{ marginTop: '12px' }}>
+            <button
+              onClick={handleNsfwToggleClick}
+              style={{
+                width: '100%',
+                padding: '10px 14px',
+                borderRadius: '12px',
+                border: `1px solid ${nsfw ? 'rgba(255,94,168,0.6)' : 'var(--line)'}`,
+                background: nsfw ? 'rgba(255,94,168,0.15)' : 'var(--panel-2)',
+                color: nsfw ? '#ffb3d9' : 'var(--muted)',
+                textAlign: 'left',
+                cursor: 'pointer',
+                fontWeight: nsfw ? 600 : 400,
+                transition: 'all 0.15s',
+                fontSize: '0.9rem',
+              }}
+            >
+              {nsfw ? '🔓 NSFW On' : '🔒 NSFW Off'}
+            </button>
+
+            {showPassphraseBox && (
+              <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <input
+                  type="password"
+                  placeholder="Passphrase..."
+                  value={passphraseInput}
+                  onChange={e => { setPassphraseInput(e.target.value); setPassphraseError(false); }}
+                  onKeyDown={e => e.key === 'Enter' && submitPassphrase()}
+                  style={{
+                    background: 'var(--panel-2)',
+                    border: `1px solid ${passphraseError ? 'rgba(255,80,80,0.6)' : 'var(--line)'}`,
+                    borderRadius: '10px',
+                    padding: '10px 12px',
+                    color: 'var(--text)',
+                    fontSize: '0.875rem',
+                    fontFamily: 'inherit',
+                    width: '100%',
+                  }}
+                />
+                {passphraseError && (
+                  <p style={{ color: 'rgba(255,80,80,0.8)', fontSize: '0.8rem', margin: 0 }}>Wrong. Try again.</p>
+                )}
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button onClick={submitPassphrase} style={{ flex: 1, padding: '8px', borderRadius: '10px', border: 'none', background: 'rgba(168,70,255,0.3)', color: '#d8a8ff', cursor: 'pointer', fontSize: '0.875rem' }}>Unlock</button>
+                  <button onClick={() => { setShowPassphraseBox(false); setPassphraseInput(''); setPassphraseError(false); }} style={{ flex: 1, padding: '8px', borderRadius: '10px', border: '1px solid var(--line)', background: 'transparent', color: 'var(--muted)', cursor: 'pointer', fontSize: '0.875rem' }}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Profile */}
         <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Profile</strong>
           <p style={{ color: 'var(--muted)', marginTop: '10px', fontSize: '0.875rem', lineHeight: 1.6 }}>
@@ -148,15 +262,15 @@ export default function NyxBot() {
         }}>
           <div>
             <h1 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '4px' }}>NyxBot</h1>
-            <p style={{ color: 'var(--muted)', fontSize: '0.875rem' }}>Mode: {mode}</p>
+            <p style={{ color: 'var(--muted)', fontSize: '0.875rem' }}>Mode: {mode}{nsfw ? ' · NSFW' : ''}</p>
           </div>
           <div style={{
             padding: '6px 14px',
             borderRadius: '999px',
-            background: 'rgba(168,70,255,0.15)',
-            border: '1px solid rgba(168,70,255,0.3)',
+            background: nsfw ? 'rgba(255,94,168,0.15)' : 'rgba(168,70,255,0.15)',
+            border: `1px solid ${nsfw ? 'rgba(255,94,168,0.3)' : 'rgba(168,70,255,0.3)'}`,
             fontSize: '0.75rem',
-            color: '#d8a8ff',
+            color: nsfw ? '#ffb3d9' : '#d8a8ff',
           }}>● Live</div>
         </header>
 
@@ -167,19 +281,25 @@ export default function NyxBot() {
               key={i}
               style={{
                 maxWidth: '760px',
-                padding: '14px 18px',
                 borderRadius: '18px',
                 border: '1px solid var(--line)',
-                lineHeight: 1.65,
-                fontSize: '0.95rem',
+                overflow: 'hidden',
                 alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
                 background: msg.role === 'nyx'
                   ? 'linear-gradient(135deg, rgba(168,70,255,0.14), rgba(255,94,168,0.08))'
                   : 'var(--panel)',
-                whiteSpace: 'pre-wrap',
               }}
             >
-              {msg.content || (loading && i === messages.length - 1 ? '...' : '')}
+              {msg.image && (
+                <img
+                  src={msg.image}
+                  alt="Generated by Nyx"
+                  style={{ width: '100%', maxWidth: '540px', display: 'block', borderRadius: '16px 16px 0 0' }}
+                />
+              )}
+              <div style={{ padding: '14px 18px', lineHeight: 1.65, fontSize: '0.95rem', whiteSpace: 'pre-wrap' }}>
+                {msg.content || (loading && i === messages.length - 1 ? '...' : '')}
+              </div>
             </div>
           ))}
           <div ref={bottomRef} />
@@ -198,7 +318,7 @@ export default function NyxBot() {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKey}
-            placeholder="Type to Nyx... (Enter to send, Shift+Enter for newline)"
+            placeholder={mode === 'Visual' ? 'Describe what you want to see...' : 'Type to Nyx... (Enter to send, Shift+Enter for newline)'}
             rows={2}
             style={{
               width: '100%',
@@ -222,7 +342,9 @@ export default function NyxBot() {
               borderRadius: '14px',
               background: loading || !input.trim()
                 ? 'rgba(168,70,255,0.3)'
-                : 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+                : nsfw
+                  ? 'linear-gradient(135deg, #ff5ea8, #a846ff)'
+                  : 'linear-gradient(135deg, var(--accent), var(--accent-2))',
               color: 'white',
               fontWeight: 700,
               fontSize: '0.9rem',
@@ -231,7 +353,7 @@ export default function NyxBot() {
               whiteSpace: 'nowrap',
             }}
           >
-            {loading ? '...' : 'Send'}
+            {loading ? (mode === 'Visual' ? '✦ creating...' : '...') : 'Send'}
           </button>
         </div>
       </main>

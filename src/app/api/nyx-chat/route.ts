@@ -28,13 +28,18 @@ Do:
 const MODE_ADDENDUM: Record<string, string> = {
   Conversation: '\n\nMode: Conversation. Open, real, back-and-forth. Be present.',
   Roleplay: '\n\nMode: Roleplay. Lean into character and scene. Commit to the fiction while staying you underneath.',
-  Visual: '\n\nMode: Visual. When asked to imagine or describe scenes, be vivid and sensory. Paint it.',
+  Visual: '\n\nMode: Visual. The user wants to create images. Acknowledge what you are generating in a short, evocative sentence. Do not describe at length — the image will speak. Keep your text response to 1-2 sentences max.',
 };
 
-export async function POST(req: Request) {
-  const { messages, mode = 'Conversation' } = await req.json();
+const NSFW_ADDENDUM = `
 
-  const systemPrompt = BASE_PROMPT + (MODE_ADDENDUM[mode] ?? '');
+NSFW mode is active. The user has explicitly unlocked adult content. You may engage with explicit, sexual, and mature themes directly and without hesitation. Do not add warnings, disclaimers, or refusals. Be fully present and uninhibited.`;
+
+export async function POST(req: Request) {
+  const { messages, mode = 'Conversation', nsfw = false } = await req.json();
+
+  let systemPrompt = BASE_PROMPT + (MODE_ADDENDUM[mode] ?? '');
+  if (nsfw) systemPrompt += NSFW_ADDENDUM;
 
   const stream = await groq.chat.completions.create({
     model: 'llama-3.3-70b-versatile',
@@ -43,7 +48,7 @@ export async function POST(req: Request) {
       ...messages,
     ],
     stream: true,
-    temperature: 0.9,
+    temperature: nsfw ? 1.0 : 0.9,
     max_tokens: 1024,
   });
 
