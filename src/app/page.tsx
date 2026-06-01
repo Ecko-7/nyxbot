@@ -1,5 +1,5 @@
 'use client';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 
 type Message = { role: 'user' | 'nyx'; content: string; image?: string; imageError?: string };
 type Mode = 'Conversation' | 'Roleplay' | 'Visual';
@@ -25,6 +25,14 @@ export default function NyxBot() {
   const [passphraseInput, setPassphraseInput] = useState('');
   const [passphraseError, setPassphraseError] = useState(false);
   const [showPassphraseBox, setShowPassphraseBox] = useState(false);
+  // Voice state
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -60,6 +68,64 @@ export default function NyxBot() {
     setConversationTitle(null);
   };
 
+  const speakText = useCallback(async (text: string) => {
+    if (!voiceEnabled || !text.trim()) return;
+    setSpeaking(true);
+    try {
+      const res = await fetch('/api/nyx-tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) { setSpeaking(false); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      if (audioRef.current) {
+        audioRef.current.pause();
+        URL.revokeObjectURL(audioRef.current.src);
+      }
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => { setSpeaking(false); URL.revokeObjectURL(url); };
+      audio.onerror = () => { setSpeaking(false); };
+      audio.play();
+    } catch { setSpeaking(false); }
+  }, [voiceEnabled]);
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      audioChunksRef.current = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mr.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        setTranscribing(true);
+        try {
+          const fd = new FormData();
+          fd.append('audio', blob, 'audio.webm');
+          const res = await fetch('/api/nyx-stt', { method: 'POST', body: fd });
+          const data = await res.json();
+          if (data.text) {
+            setInput(data.text.trim());
+          }
+        } catch {}
+        setTranscribing(false);
+      };
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setRecording(true);
+    } catch {
+      alert('Microphone access denied.');
+    }
+  };
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop();
+    setRecording(false);
+  };
+
   const handleNsfwToggleClick = () => {
     if (nsfwUnlocked) setNsfw(prev => !prev);
     else setShowPassphraseBox(true);
@@ -76,8 +142,8 @@ export default function NyxBot() {
     }
   };
 
-  const send = async () => {
-    const text = input.trim();
+  const send = async (textOverride?: string) => {
+    const text = (textOverride ?? input).trim();
     if (!text || loading) return;
     setInput('');
     const userMsg: Message = { role: 'user', content: text };
@@ -98,31 +164,20 @@ export default function NyxBot() {
     setMessages(prev => [...prev, nyxPlaceholder]);
 
     try {
-      // Fire image request in parallel with chat stream
       const imagePromise = mode === 'Visual'
         ? fetch('/api/nyx-image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt: text, nsfw }),
-          })
-          .then(r => r.json())
-          .then(d => {
-            if (d.error) return { error: d.error as string };
-            return { image: d.image as string };
-          })
-          .catch(e => ({ error: String(e) }))
+          }).then(r => r.json()).then(d => d.error ? { error: d.error as string } : { image: d.image as string }).catch(e => ({ error: String(e) }))
         : Promise.resolve(null);
 
       const res = await fetch('/api/nyx-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: [...messages, userMsg].map(m => ({
-            role: m.role === 'nyx' ? 'assistant' : 'user',
-            content: m.content,
-          })),
-          mode,
-          nsfw,
+          messages: [...messages, userMsg].map(m => ({ role: m.role === 'nyx' ? 'assistant' : 'user', content: m.content })),
+          mode, nsfw,
         }),
       });
 
@@ -155,35 +210,23 @@ export default function NyxBot() {
 
       setLoading(false);
 
-      // Await image result after chat stream completes
+      // Speak Nyx's response if voice is on
+      if (voiceEnabled && full) speakText(full);
+
       if (mode === 'Visual') {
         const imgResult = await imagePromise;
         setImageLoading(false);
         if (imgResult && 'image' in imgResult && imgResult.image) {
-          setMessages(prev => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { ...updated[updated.length - 1], image: imgResult.image };
-            return updated;
-          });
+          setMessages(prev => { const u = [...prev]; u[u.length - 1] = { ...u[u.length - 1], image: imgResult.image }; return u; });
         } else if (imgResult && 'error' in imgResult) {
-          setMessages(prev => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { ...updated[updated.length - 1], imageError: imgResult.error };
-            return updated;
-          });
+          setMessages(prev => { const u = [...prev]; u[u.length - 1] = { ...u[u.length - 1], imageError: imgResult.error }; return u; });
         }
       }
     } catch {
-      setLoading(false);
-      setImageLoading(false);
-      setMessages(prev => {
-        const updated = [...prev];
-        updated[updated.length - 1] = { role: 'nyx', content: 'Something broke. Try again. \ud83d\udda4' };
-        return updated;
-      });
+      setLoading(false); setImageLoading(false);
+      setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: 'nyx', content: 'Something broke. Try again. \ud83d\udda4' }; return u; });
     } finally {
-      setLoading(false);
-      setImageLoading(false);
+      setLoading(false); setImageLoading(false);
     }
   };
 
@@ -193,11 +236,7 @@ export default function NyxBot() {
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', minHeight: '100vh' }}>
-      <aside style={{
-        borderRight: '1px solid var(--line)', padding: '24px',
-        background: 'rgba(0,0,0,0.18)', backdropFilter: 'blur(12px)',
-        display: 'flex', flexDirection: 'column', gap: '16px',
-      }}>
+      <aside style={{ borderRight: '1px solid var(--line)', padding: '24px', background: 'rgba(0,0,0,0.18)', backdropFilter: 'blur(12px)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
         <div>
           <div style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '6px' }}>NyxBot</div>
           <div style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>Voice, image, dream, intimacy layer</div>
@@ -219,6 +258,33 @@ export default function NyxBot() {
           </div>
         </div>
 
+        {/* Voice panel */}
+        <div style={{ background: 'var(--panel)', border: `1px solid ${voiceEnabled ? 'rgba(168,70,255,0.4)' : 'var(--line)'}`, borderRadius: 'var(--radius)', padding: '16px' }}>
+          <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Voice</strong>
+          <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <button onClick={() => {
+              if (voiceEnabled && audioRef.current) { audioRef.current.pause(); setSpeaking(false); }
+              setVoiceEnabled(prev => !prev);
+            }} style={{
+              width: '100%', padding: '10px 14px', borderRadius: '12px',
+              border: `1px solid ${voiceEnabled ? 'rgba(168,70,255,0.6)' : 'var(--line)'}`,
+              background: voiceEnabled ? 'rgba(168,70,255,0.15)' : 'var(--panel-2)',
+              color: voiceEnabled ? '#d8a8ff' : 'var(--muted)',
+              textAlign: 'left', cursor: 'pointer',
+              fontWeight: voiceEnabled ? 600 : 400, transition: 'all 0.15s', fontSize: '0.9rem',
+            }}>
+              {voiceEnabled ? (speaking ? '\ud83d\udd0a Speaking...' : '\ud83d\udd0a Voice On') : '\ud83d\udd07 Voice Off'}
+            </button>
+            {voiceEnabled && speaking && (
+              <button onClick={() => { audioRef.current?.pause(); setSpeaking(false); }} style={{
+                width: '100%', padding: '8px 12px', borderRadius: '10px',
+                border: '1px solid rgba(255,80,80,0.3)', background: 'rgba(255,80,80,0.08)',
+                color: 'rgba(255,120,120,0.9)', cursor: 'pointer', fontSize: '0.8rem',
+              }}>\u23f9 Stop</button>
+            )}
+          </div>
+        </div>
+
         <div style={{ background: 'var(--panel)', border: `1px solid ${nsfw ? 'rgba(255,94,168,0.4)' : 'var(--line)'}`, borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Content</strong>
           <div style={{ marginTop: '12px' }}>
@@ -229,21 +295,14 @@ export default function NyxBot() {
               color: nsfw ? '#ffb3d9' : 'var(--muted)',
               textAlign: 'left', cursor: 'pointer',
               fontWeight: nsfw ? 600 : 400, transition: 'all 0.15s', fontSize: '0.9rem',
-            }}>
-              {nsfw ? '\ud83d\udd13 NSFW On' : '\ud83d\udd12 NSFW Off'}
-            </button>
+            }}>{nsfw ? '\ud83d\udd13 NSFW On' : '\ud83d\udd12 NSFW Off'}</button>
             {showPassphraseBox && (
               <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 <input type="password" placeholder="Passphrase..."
                   value={passphraseInput}
                   onChange={e => { setPassphraseInput(e.target.value); setPassphraseError(false); }}
                   onKeyDown={e => e.key === 'Enter' && submitPassphrase()}
-                  style={{
-                    background: 'var(--panel-2)',
-                    border: `1px solid ${passphraseError ? 'rgba(255,80,80,0.6)' : 'var(--line)'}`,
-                    borderRadius: '10px', padding: '10px 12px', color: 'var(--text)',
-                    fontSize: '0.875rem', fontFamily: 'inherit', width: '100%',
-                  }}
+                  style={{ background: 'var(--panel-2)', border: `1px solid ${passphraseError ? 'rgba(255,80,80,0.6)' : 'var(--line)'}`, borderRadius: '10px', padding: '10px 12px', color: 'var(--text)', fontSize: '0.875rem', fontFamily: 'inherit', width: '100%' }}
                 />
                 {passphraseError && <p style={{ color: 'rgba(255,80,80,0.8)', fontSize: '0.8rem', margin: 0 }}>Wrong. Try again.</p>}
                 <div style={{ display: 'flex', gap: '8px' }}>
@@ -259,14 +318,8 @@ export default function NyxBot() {
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Memory</strong>
           {conversationTitle ? (
             <div style={{ marginTop: '10px' }}>
-              <p style={{ color: 'var(--text)', fontSize: '0.875rem', lineHeight: 1.5, marginBottom: '10px', fontStyle: 'italic' }}>
-                &ldquo;{conversationTitle}&rdquo;
-              </p>
-              <button onClick={clearConversation} style={{
-                width: '100%', padding: '8px 12px', borderRadius: '10px',
-                border: '1px solid rgba(255,80,80,0.3)', background: 'rgba(255,80,80,0.08)',
-                color: 'rgba(255,120,120,0.9)', cursor: 'pointer', fontSize: '0.8rem', transition: 'all 0.15s',
-              }}>✕ Clear conversation</button>
+              <p style={{ color: 'var(--text)', fontSize: '0.875rem', lineHeight: 1.5, marginBottom: '10px', fontStyle: 'italic' }}>&ldquo;{conversationTitle}&rdquo;</p>
+              <button onClick={clearConversation} style={{ width: '100%', padding: '8px 12px', borderRadius: '10px', border: '1px solid rgba(255,80,80,0.3)', background: 'rgba(255,80,80,0.08)', color: 'rgba(255,120,120,0.9)', cursor: 'pointer', fontSize: '0.8rem', transition: 'all 0.15s' }}>\u2715 Clear conversation</button>
             </div>
           ) : (
             <p style={{ color: 'var(--muted)', marginTop: '10px', fontSize: '0.875rem', lineHeight: 1.6 }}>Conversation will persist across sessions.</p>
@@ -280,48 +333,19 @@ export default function NyxBot() {
             <h1 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: '4px' }}>NyxBot</h1>
             <p style={{ color: 'var(--muted)', fontSize: '0.875rem' }}>Mode: {mode}{nsfw ? ' \u00b7 NSFW' : ''}</p>
           </div>
-          <div style={{
-            padding: '6px 14px', borderRadius: '999px',
-            background: nsfw ? 'rgba(255,94,168,0.15)' : 'rgba(168,70,255,0.15)',
-            border: `1px solid ${nsfw ? 'rgba(255,94,168,0.3)' : 'rgba(168,70,255,0.3)'}`,
-            fontSize: '0.75rem', color: nsfw ? '#ffb3d9' : '#d8a8ff',
-          }}>{imageLoading ? '\u2726 generating...' : '\u25cf Live'}</div>
+          <div style={{ padding: '6px 14px', borderRadius: '999px', background: nsfw ? 'rgba(255,94,168,0.15)' : 'rgba(168,70,255,0.15)', border: `1px solid ${nsfw ? 'rgba(255,94,168,0.3)' : 'rgba(168,70,255,0.3)'}`, fontSize: '0.75rem', color: nsfw ? '#ffb3d9' : '#d8a8ff' }}>
+            {speaking ? '\ud83d\udd0a speaking' : imageLoading ? '\u2726 generating...' : '\u25cf Live'}
+          </div>
         </header>
 
         <section style={{ padding: '24px 28px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {messages.map((msg, i) => (
-            <div key={i} style={{
-              maxWidth: '760px', borderRadius: '18px',
-              border: '1px solid var(--line)', overflow: 'hidden',
-              alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-              background: msg.role === 'nyx'
-                ? 'linear-gradient(135deg, rgba(168,70,255,0.14), rgba(255,94,168,0.08))'
-                : 'var(--panel)',
-            }}>
-              {msg.image && (
-                <img src={msg.image} alt="Generated by Nyx"
-                  style={{ width: '100%', maxWidth: '540px', display: 'block', borderRadius: '16px 16px 0 0' }}
-                />
-              )}
-              {!msg.image && msg.imageError && (
-                <div style={{
-                  padding: '12px 18px', fontSize: '0.8rem',
-                  color: 'rgba(255,120,120,0.8)',
-                  borderBottom: '1px solid var(--line)',
-                  background: 'rgba(255,80,80,0.06)',
-                }}>
-                  \u26a0\ufe0f Image generation failed: {msg.imageError}
-                </div>
-              )}
+            <div key={i} style={{ maxWidth: '760px', borderRadius: '18px', border: '1px solid var(--line)', overflow: 'hidden', alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', background: msg.role === 'nyx' ? 'linear-gradient(135deg, rgba(168,70,255,0.14), rgba(255,94,168,0.08))' : 'var(--panel)' }}>
+              {msg.image && <img src={msg.image} alt="Generated by Nyx" style={{ width: '100%', maxWidth: '540px', display: 'block', borderRadius: '16px 16px 0 0' }} />}
+              {!msg.image && msg.imageError && <div style={{ padding: '12px 18px', fontSize: '0.8rem', color: 'rgba(255,120,120,0.8)', borderBottom: '1px solid var(--line)', background: 'rgba(255,80,80,0.06)' }}>\u26a0\ufe0f Image generation failed: {msg.imageError}</div>}
               {imageLoading && i === messages.length - 1 && mode === 'Visual' && !msg.image && !msg.imageError && (
-                <div style={{
-                  padding: '24px 18px', fontSize: '0.875rem',
-                  color: 'var(--muted)', borderBottom: '1px solid var(--line)',
-                  background: 'rgba(168,70,255,0.06)',
-                  display: 'flex', alignItems: 'center', gap: '10px',
-                }}>
-                  <span style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>\u2726</span>
-                  Creating image...
+                <div style={{ padding: '24px 18px', fontSize: '0.875rem', color: 'var(--muted)', borderBottom: '1px solid var(--line)', background: 'rgba(168,70,255,0.06)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  \u2726 Creating image...
                 </div>
               )}
               <div style={{ padding: '14px 18px', lineHeight: 1.65, fontSize: '0.95rem', whiteSpace: 'pre-wrap' }}>
@@ -332,22 +356,32 @@ export default function NyxBot() {
           <div ref={bottomRef} />
         </section>
 
-        <div style={{ padding: '16px 28px 24px', borderTop: '1px solid var(--line)', display: 'grid', gridTemplateColumns: '1fr auto', gap: '12px', alignItems: 'end' }}>
+        <div style={{ padding: '16px 28px 24px', borderTop: '1px solid var(--line)', display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '10px', alignItems: 'end' }}>
           <textarea
             value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKey}
-            placeholder={mode === 'Visual' ? 'Describe what you want to see...' : 'Type to Nyx... (Enter to send, Shift+Enter for newline)'}
-            rows={2}
-            style={{
-              width: '100%', resize: 'vertical', background: 'var(--panel)', color: 'var(--text)',
-              border: '1px solid var(--line)', borderRadius: '14px', padding: '14px 16px',
-              fontFamily: 'inherit', fontSize: '0.95rem', lineHeight: 1.5,
-            }}
+            placeholder={transcribing ? 'Transcribing...' : mode === 'Visual' ? 'Describe what you want to see...' : 'Type to Nyx... (Enter to send, Shift+Enter for newline)'}
+            rows={2} disabled={transcribing}
+            style={{ width: '100%', resize: 'vertical', background: 'var(--panel)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: '14px', padding: '14px 16px', fontFamily: 'inherit', fontSize: '0.95rem', lineHeight: 1.5 }}
           />
-          <button onClick={send} disabled={loading || !input.trim()} style={{
+          {/* Mic button */}
+          <button
+            onMouseDown={startRecording} onMouseUp={stopRecording}
+            onTouchStart={startRecording} onTouchEnd={stopRecording}
+            disabled={loading || transcribing}
+            title="Hold to speak"
+            style={{
+              padding: '14px 16px', border: 'none', borderRadius: '14px',
+              background: recording ? 'rgba(255,80,80,0.4)' : transcribing ? 'rgba(168,70,255,0.2)' : 'var(--panel)',
+              border: `1px solid ${recording ? 'rgba(255,80,80,0.6)' : 'var(--line)'}`,
+              color: recording ? 'rgba(255,120,120,0.9)' : 'var(--muted)',
+              cursor: loading || transcribing ? 'not-allowed' : 'pointer',
+              fontSize: '1.1rem', transition: 'all 0.15s', whiteSpace: 'nowrap',
+            }}>
+            {recording ? '\ud83d\udd34' : transcribing ? '\u29d7' : '\ud83c\udfa4'}
+          </button>
+          <button onClick={() => send()} disabled={loading || !input.trim()} style={{
             padding: '14px 22px', border: 'none', borderRadius: '14px',
-            background: loading || !input.trim() ? 'rgba(168,70,255,0.3)'
-              : nsfw ? 'linear-gradient(135deg, #ff5ea8, #a846ff)'
-              : 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+            background: loading || !input.trim() ? 'rgba(168,70,255,0.3)' : nsfw ? 'linear-gradient(135deg, #ff5ea8, #a846ff)' : 'linear-gradient(135deg, var(--accent), var(--accent-2))',
             color: 'white', fontWeight: 700, fontSize: '0.9rem',
             cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
             transition: 'all 0.15s', whiteSpace: 'nowrap',
