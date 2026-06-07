@@ -14,49 +14,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid prompt.' }, { status: 400 });
   }
 
-  const hfToken = process.env.HF_TOKEN;
-
-  // Try HuggingFace FLUX first if token is available
-  if (hfToken) {
-    try {
-      const response = await fetch(
-        'https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell',
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${hfToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ inputs: enhancePrompt(prompt) }),
-        }
-      );
-
-      if (response.ok) {
-        const contentType = response.headers.get('content-type') ?? 'image/jpeg';
-        if (contentType.startsWith('image/')) {
-          const imageBuffer = await response.arrayBuffer();
-          const base64 = Buffer.from(imageBuffer).toString('base64');
-          return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
-        }
-      }
-
-      // If HF returns 503 (model loading), fall through to Pollinations
-      if (response.status !== 503) {
-        const errText = await response.text();
-        console.error('HF error:', response.status, errText.slice(0, 100));
-      }
-    } catch (e) {
-      console.error('HF fetch error:', e);
-    }
-  }
-
-  // Fallback: Pollinations (no token needed)
   try {
     const encoded = encodeURIComponent(enhancePrompt(prompt));
-    const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=-1&nologo=true`;
-    const response = await fetch(url, {
-      headers: { 'User-Agent': 'NyxBot/1.0' },
-    });
+    const seed = Math.floor(Math.random() * 1000000);
+    const apiKey = process.env.POLLINATIONS_API_KEY;
+
+    const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true`;
+
+    const headers: Record<string, string> = {
+      'User-Agent': 'NyxBot/1.0',
+    };
+
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    const response = await fetch(url, { headers });
 
     if (!response.ok) {
       const errText = await response.text();
