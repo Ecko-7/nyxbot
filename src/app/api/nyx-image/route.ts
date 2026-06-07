@@ -21,8 +21,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // Submit to fal.ai FLUX schnell
-    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
+    const res = await fetch('https://fal.run/fal-ai/flux/schnell', {
       method: 'POST',
       headers: {
         'Authorization': `Key ${falKey}`,
@@ -37,49 +36,26 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-    if (!submitRes.ok) {
-      const err = await submitRes.text();
-      console.error('fal submit error:', submitRes.status, err.slice(0, 100));
+    if (!res.ok) {
+      const err = await res.text();
+      console.error('fal.ai error:', res.status, err.slice(0, 200));
       return NextResponse.json({ error: 'Image generation failed.' }, { status: 502 });
     }
 
-    const { request_id, response_url } = await submitRes.json();
+    const result = await res.json();
+    const imageUrl = result.images?.[0]?.url;
 
-    // Poll for result
-    const pollUrl = response_url || `https://queue.fal.run/fal-ai/flux/schnell/requests/${request_id}`;
-    let attempts = 0;
-    while (attempts < 30) {
-      await new Promise(r => setTimeout(r, 2000));
-      const pollRes = await fetch(pollUrl, {
-        headers: { 'Authorization': `Key ${falKey}` },
-      });
-
-      if (!pollRes.ok) { attempts++; continue; }
-
-      const result = await pollRes.json();
-
-      if (result.status === 'COMPLETED' || result.images) {
-        const imageUrl = result.images?.[0]?.url;
-        if (!imageUrl) {
-          return NextResponse.json({ error: 'No image returned.' }, { status: 502 });
-        }
-
-        // Fetch image and convert to base64
-        const imgRes = await fetch(imageUrl);
-        const contentType = imgRes.headers.get('content-type') ?? 'image/jpeg';
-        const imageBuffer = await imgRes.arrayBuffer();
-        const base64 = Buffer.from(imageBuffer).toString('base64');
-        return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
-      }
-
-      if (result.status === 'FAILED') {
-        return NextResponse.json({ error: 'Image generation failed.' }, { status: 502 });
-      }
-
-      attempts++;
+    if (!imageUrl) {
+      console.error('fal.ai no image url in result:', JSON.stringify(result).slice(0, 200));
+      return NextResponse.json({ error: 'No image returned.' }, { status: 502 });
     }
 
-    return NextResponse.json({ error: 'Image generation timed out.' }, { status: 504 });
+    // Fetch image and return as base64
+    const imgRes = await fetch(imageUrl);
+    const contentType = imgRes.headers.get('content-type') ?? 'image/jpeg';
+    const imageBuffer = await imgRes.arrayBuffer();
+    const base64 = Buffer.from(imageBuffer).toString('base64');
+    return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
 
   } catch (e) {
     console.error('nyx-image error:', e);
