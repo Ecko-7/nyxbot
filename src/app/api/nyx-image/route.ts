@@ -14,42 +14,75 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid prompt.' }, { status: 400 });
   }
 
+  const falKey = process.env.FAL_KEY;
+
+  if (!falKey) {
+    return NextResponse.json({ error: 'Image service not configured.' }, { status: 500 });
+  }
+
   try {
-    const encoded = encodeURIComponent(enhancePrompt(prompt));
-    const seed = Math.floor(Math.random() * 1000000);
-    const apiKey = process.env.POLLINATIONS_API_KEY;
+    // Submit to fal.ai FLUX schnell
+    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Key ${falKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        prompt: enhancePrompt(prompt),
+        image_size: 'landscape_4_3',
+        num_inference_steps: 4,
+        num_images: 1,
+        enable_safety_checker: false,
+      }),
+    });
 
-    const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true`;
-
-    const headers: Record<string, string> = {
-      'User-Agent': 'NyxBot/1.0',
-    };
-
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
+    if (!submitRes.ok) {
+      const err = await submitRes.text();
+      console.error('fal submit error:', submitRes.status, err.slice(0, 100));
+      return NextResponse.json({ error: 'Image generation failed.' }, { status: 502 });
     }
 
-    const response = await fetch(url, { headers });
+    const { request_id, response_url } = await submitRes.json();
 
-    if (!response.ok) {
-      const errText = await response.text();
-      const isQueue = errText.includes('Queue') || response.status === 402;
-      return NextResponse.json(
-        { error: isQueue ? 'queue' : `Image generation failed (${response.status})` },
-        { status: response.status }
-      );
+    // Poll for result
+    const pollUrl = response_url || `https://queue.fal.run/fal-ai/flux/schnell/requests/${request_id}`;
+    let attempts = 0;
+    while (attempts < 30) {
+      await new Promise(r => setTimeout(r, 2000));
+      const pollRes = await fetch(pollUrl, {
+        headers: { 'Authorization': `Key ${falKey}` },
+      });
+
+      if (!pollRes.ok) { attempts++; continue; }
+
+      const result = await pollRes.json();
+
+      if (result.status === 'COMPLETED' || result.images) {
+        const imageUrl = result.images?.[0]?.url;
+        if (!imageUrl) {
+          return NextResponse.json({ error: 'No image returned.' }, { status: 502 });
+        }
+
+        // Fetch image and convert to base64
+        const imgRes = await fetch(imageUrl);
+        const contentType = imgRes.headers.get('content-type') ?? 'image/jpeg';
+        const imageBuffer = await imgRes.arrayBuffer();
+        const base64 = Buffer.from(imageBuffer).toString('base64');
+        return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
+      }
+
+      if (result.status === 'FAILED') {
+        return NextResponse.json({ error: 'Image generation failed.' }, { status: 502 });
+      }
+
+      attempts++;
     }
 
-    const contentType = response.headers.get('content-type') ?? 'image/jpeg';
-    if (!contentType.startsWith('image/')) {
-      return NextResponse.json({ error: 'Unexpected response from image service.' }, { status: 502 });
-    }
-
-    const imageBuffer = await response.arrayBuffer();
-    const base64 = Buffer.from(imageBuffer).toString('base64');
-    return NextResponse.json({ image: `data:${contentType};base64,${base64}` });
+    return NextResponse.json({ error: 'Image generation timed out.' }, { status: 504 });
 
   } catch (e) {
+    console.error('nyx-image error:', e);
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
 }
