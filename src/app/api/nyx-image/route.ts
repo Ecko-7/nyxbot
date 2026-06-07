@@ -14,36 +14,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid prompt.' }, { status: 400 });
   }
 
-  const falKey = process.env.FAL_KEY;
+const cfRes = await fetch("https://nyx-image-gen.bullmans-account7516.workers.dev", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ prompt }),
+});
 
-  if (!falKey) {
-    return NextResponse.json({ error: 'Image service not configured.' }, { status: 500 });
-  }
+if (!cfRes.ok) {
+  const err = await cfRes.json();
+  throw new Error(err.error || "Image generation failed");
+}
 
-  try {
-    const res = await fetch('https://fal.run/fal-ai/flux/schnell', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Key ${falKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        prompt: enhancePrompt(prompt),
-        image_size: 'landscape_4_3',
-        num_inference_steps: 4,
-        num_images: 1,
-        enable_safety_checker: false,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      console.error('fal.ai error:', res.status, err.slice(0, 200));
-      return NextResponse.json({ error: 'Image generation failed.' }, { status: 502 });
-    }
-
-    const result = await res.json();
-    const imageUrl = result.images?.[0]?.url;
+const arrayBuffer = await cfRes.arrayBuffer();
+const base64 = Buffer.from(arrayBuffer).toString("base64");
+const imageUrl = `data:image/jpeg;base64,${base64}`;
 
     if (!imageUrl) {
       console.error('fal.ai no image url in result:', JSON.stringify(result).slice(0, 200));
