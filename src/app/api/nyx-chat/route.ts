@@ -3,7 +3,12 @@ import type { ChatCompletionMessageParam } from 'groq-sdk/resources/chat/complet
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+// Lazy — instantiated per-request so build-time env doesn't need GROQ_API_KEY
+let _groq: Groq | null = null;
+function getGroq(): Groq {
+  if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return _groq;
+}
 
 // Primary model — high quality. Fallback — separate quota pool, still coherent.
 const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
@@ -58,7 +63,7 @@ async function createStream(
   nsfw: boolean,
   mode: string
 ) {
-  return groq.chat.completions.create({
+  return getGroq().chat.completions.create({
     model,
     messages: [
       { role: 'system', content: systemPrompt },
