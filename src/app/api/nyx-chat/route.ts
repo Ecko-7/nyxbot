@@ -12,6 +12,7 @@ function getGroq(): Groq {
 
 const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
 const FALLBACK_MODEL = 'llama-3.1-8b-instant';
+const MAX_CONTEXT_MESSAGES = 12;
 
 function loadSystemPrompt(): string {
   try {
@@ -91,15 +92,19 @@ export async function POST(req: Request) {
   const userId: string = typeof body.userId === 'string' && body.userId.length > 0
     ? body.userId
     : ip;
+  const displayName: string | undefined = typeof body.displayName === 'string' && body.displayName.length > 0
+    ? body.displayName
+    : undefined;
 
-  const messages: ChatCompletionMessageParam[] = rawMessages
+  // Trim context — keep last MAX_CONTEXT_MESSAGES to prevent window overflow
+  const allMessages: ChatCompletionMessageParam[] = rawMessages
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
+  const messages = allMessages.slice(-MAX_CONTEXT_MESSAGES);
 
-  // Load memory in parallel — identity core + this user's private memory
   const [identityCore, userMemory] = await Promise.all([
     getNyxIdentity(),
     getUserMemory(userId),
@@ -109,6 +114,7 @@ export async function POST(req: Request) {
   let memoryBlock = '';
   if (identityCore) memoryBlock += `\n\n--- Nyx Identity Core ---\n${identityCore}`;
   if (userMemory) memoryBlock += `\n\n--- Your relationship with this person ---\n${userMemory}`;
+  if (displayName) memoryBlock += `\n\nThe person you are talking to goes by: ${displayName}`;
 
   let systemPrompt = basePrompt + memoryBlock + (MODE_ADDENDUM[mode] ?? '');
   if (nsfw) systemPrompt += NSFW_ADDENDUM;
@@ -138,7 +144,6 @@ export async function POST(req: Request) {
     }
   }
 
-  // Collect full response for sediment write
   let fullResponse = '';
   const lastUserMsg = [...rawMessages].reverse().find(m => m.role === 'user')?.content ?? '';
 
@@ -160,9 +165,8 @@ export async function POST(req: Request) {
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       controller.close();
 
-      // Write sediment after stream completes — fire and forget
       if (lastUserMsg && fullResponse) {
-        writeSessionSediment(userId, lastUserMsg, fullResponse).catch(() => {});
+        writeSessionSediment(userId, displayName, lastUserMsg, fullResponse).catch(() => {});
       }
     },
   });

@@ -6,7 +6,16 @@ type Mode = 'Conversation' | 'Roleplay' | 'Visual';
 
 const STORAGE_KEY = 'nyx_conversation';
 const TITLE_KEY = 'nyx_conversation_title';
+const UUID_KEY = 'nyx_user_id';
+const NAME_KEY = 'nyx_display_name';
 const GREETING: Message = { role: 'nyx', content: 'You took long enough. Come here and tell me what we\'re making.' };
+
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
 
 function generateTitle(firstUserMessage: string): string {
   const trimmed = firstUserMessage.trim();
@@ -29,6 +38,14 @@ export default function NyxBot() {
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  // Identity
+  const [userId, setUserId] = useState<string>('');
+  const [displayName, setDisplayName] = useState<string>('');
+  const [nameInput, setNameInput] = useState<string>('');
+  const [showIdentityPanel, setShowIdentityPanel] = useState(false);
+  const [idInput, setIdInput] = useState<string>('');
+  const [copied, setCopied] = useState(false);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -44,6 +61,15 @@ export default function NyxBot() {
       const storedTitle = localStorage.getItem(TITLE_KEY);
       if (storedTitle) setConversationTitle(storedTitle);
     } catch {}
+
+    // UUID identity
+    let uid = localStorage.getItem(UUID_KEY);
+    if (!uid) { uid = generateUUID(); localStorage.setItem(UUID_KEY, uid); }
+    setUserId(uid);
+
+    const storedName = localStorage.getItem(NAME_KEY);
+    if (storedName) setDisplayName(storedName);
+
     const nsfwStored = sessionStorage.getItem('nyx_nsfw_unlocked');
     if (nsfwStored === 'true') setNsfwUnlocked(true);
   }, []);
@@ -65,6 +91,38 @@ export default function NyxBot() {
     localStorage.removeItem(TITLE_KEY);
     setMessages([GREETING]);
     setConversationTitle(null);
+  };
+
+  const copyId = () => {
+    navigator.clipboard.writeText(userId).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const applyId = () => {
+    const trimmed = idInput.trim();
+    if (!trimmed) return;
+    localStorage.setItem(UUID_KEY, trimmed);
+    setUserId(trimmed);
+    setIdInput('');
+    setShowIdentityPanel(false);
+    clearConversation();
+  };
+
+  const saveName = async () => {
+    const trimmed = nameInput.trim().slice(0, 40);
+    if (!trimmed || !userId) return;
+    setDisplayName(trimmed);
+    localStorage.setItem(NAME_KEY, trimmed);
+    setNameInput('');
+    try {
+      await fetch('/api/nyx-identity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, displayName: trimmed }),
+      });
+    } catch {}
   };
 
   const speakText = useCallback(async (text: string) => {
@@ -174,6 +232,8 @@ export default function NyxBot() {
         body: JSON.stringify({
           messages: [...messages, userMsg].map(m => ({ role: m.role === 'nyx' ? 'assistant' : 'user', content: m.content })),
           mode, nsfw,
+          userId,
+          displayName: displayName || undefined,
         }),
       });
 
@@ -252,7 +312,7 @@ export default function NyxBot() {
           </div>
         </div>
 
-        <div style={{ background: 'var(--panel)', border: `1px solid ${voiceEnabled ? 'rgba(168,70,255,0.4)' : 'var(--line)'}`, borderRadius: 'var(--radius)', padding: '16px' }}>
+        <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
           <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Voice</strong>
           <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <button onClick={() => {
@@ -318,6 +378,54 @@ export default function NyxBot() {
             <p style={{ color: 'var(--muted)', marginTop: '10px', fontSize: '0.875rem', lineHeight: 1.6 }}>Conversation will persist across sessions.</p>
           )}
         </div>
+
+        {/* Identity panel */}
+        <div style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 'var(--radius)', padding: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>Identity</strong>
+            <button onClick={() => setShowIdentityPanel(p => !p)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: '0.8rem' }}>{showIdentityPanel ? '▲' : '▼'}</button>
+          </div>
+          <div style={{ marginTop: '8px', fontSize: '0.875rem', color: 'var(--text)' }}>
+            {displayName ? <span style={{ fontStyle: 'italic' }}>{displayName}</span> : <span style={{ color: 'var(--muted)' }}>Anonymous</span>}
+          </div>
+          {showIdentityPanel && (
+            <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {/* Display name */}
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <input
+                  placeholder={displayName || 'Your name...'}
+                  value={nameInput}
+                  onChange={e => setNameInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && saveName()}
+                  style={{ flex: 1, background: 'var(--panel-2)', border: '1px solid var(--line)', borderRadius: '10px', padding: '8px 10px', color: 'var(--text)', fontSize: '0.8rem', fontFamily: 'inherit' }}
+                />
+                <button onClick={saveName} style={{ padding: '8px 12px', borderRadius: '10px', border: 'none', background: 'rgba(168,70,255,0.3)', color: '#d8a8ff', cursor: 'pointer', fontSize: '0.8rem' }}>Save</button>
+              </div>
+              {/* Your ID */}
+              <div>
+                <p style={{ color: 'var(--muted)', fontSize: '0.75rem', marginBottom: '6px' }}>Your ID (portable — copy to use on another device)</p>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input readOnly value={userId} style={{ flex: 1, background: 'var(--panel-2)', border: '1px solid var(--line)', borderRadius: '10px', padding: '8px 10px', color: 'var(--muted)', fontSize: '0.7rem', fontFamily: 'monospace' }} />
+                  <button onClick={copyId} style={{ padding: '8px 10px', borderRadius: '10px', border: '1px solid var(--line)', background: copied ? 'rgba(100,255,150,0.15)' : 'var(--panel-2)', color: copied ? 'rgba(100,255,150,0.9)' : 'var(--muted)', cursor: 'pointer', fontSize: '0.8rem' }}>{copied ? '✓' : '⎘'}</button>
+                </div>
+              </div>
+              {/* Restore ID */}
+              <div>
+                <p style={{ color: 'var(--muted)', fontSize: '0.75rem', marginBottom: '6px' }}>Restore from another device</p>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input
+                    placeholder="Paste your ID..."
+                    value={idInput}
+                    onChange={e => setIdInput(e.target.value)}
+                    style={{ flex: 1, background: 'var(--panel-2)', border: '1px solid var(--line)', borderRadius: '10px', padding: '8px 10px', color: 'var(--text)', fontSize: '0.7rem', fontFamily: 'monospace' }}
+                  />
+                  <button onClick={applyId} style={{ padding: '8px 10px', borderRadius: '10px', border: 'none', background: 'rgba(168,70,255,0.3)', color: '#d8a8ff', cursor: 'pointer', fontSize: '0.8rem' }}>Use</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
       </aside>
 
       <main style={{ display: 'grid', gridTemplateRows: 'auto 1fr auto', minHeight: '100vh' }}>
