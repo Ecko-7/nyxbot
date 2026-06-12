@@ -1,5 +1,6 @@
 import { getDb } from './nyx-firebase';
 import { FieldValue } from 'firebase-admin/firestore';
+import { writeEckoFragment } from './ecko-writer';
 
 // --- Identity core (shared, who Nyx is) ---
 export async function getNyxIdentity(): Promise<string> {
@@ -83,5 +84,15 @@ export async function writeSessionSediment(
 ): Promise<void> {
   const name = displayName ?? 'User';
   const fragment = `[${new Date().toISOString()}]\n${name}: ${userMsg.slice(0, 300)}\nNyx: ${nyxMsg.slice(0, 300)}`;
+
+  // Existing sediment write — unchanged
   await appendUserSediment(userId, fragment);
+
+  // ECKO bridge — fire and forget
+  // Writes to ecko-archive/{userId}/fragments/{ts} with source: 'nyx'
+  writeEckoFragment({
+    sessionId: userId,
+    fragmentId: `${Date.now()}`,
+    content: fragment,
+  }).catch(() => {});
 }
