@@ -90,9 +90,12 @@ export async function writeSessionSediment(
 
   // ECKO bridge — fire and forget
   // Writes to ecko-archive/{userId}/fragments/{ts} with source: 'nyx'
+  // Dynamic weight matches the route handler formula: min(1 + floor(length / 500), 5)
   writeEckoFragment({
     sessionId: userId,
     fragmentId: `${Date.now()}`,
     content: fragment,
+    weight: Math.min(1 + Math.floor(fragment.length / 500), 5),
+    kept: true,
   }).catch(() => {});
 }
