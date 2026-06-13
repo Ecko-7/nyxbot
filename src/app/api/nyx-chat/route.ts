@@ -3,6 +3,7 @@ import type { ChatCompletionMessageParam } from 'groq-sdk/resources/chat/complet
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { getNyxIdentity, getUserMemory, writeSessionSediment } from '../../../../lib/nyx-memory';
+import { writeEckoFragment } from '../../../../lib/ecko-writer';
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -96,7 +97,6 @@ export async function POST(req: Request) {
     ? body.displayName
     : undefined;
 
-  // Trim context — keep last MAX_CONTEXT_MESSAGES to prevent window overflow
   const allMessages: ChatCompletionMessageParam[] = rawMessages
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .map(m => ({
@@ -165,8 +165,21 @@ export async function POST(req: Request) {
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       controller.close();
 
+      const ts = Date.now();
+
       if (lastUserMsg && fullResponse) {
         writeSessionSediment(userId, displayName, lastUserMsg, fullResponse).catch(() => {});
+      }
+
+      // ── ECKO archive — write fragment for every Nyx turn ───────────────────────
+      if (fullResponse) {
+        writeEckoFragment({
+          sessionId: userId,
+          fragmentId: `nyx__${ts}`,
+          content: fullResponse,
+          weight: Math.min(1 + Math.floor(fullResponse.length / 500), 5),
+          kept: true,
+        }).catch(() => {});
       }
     },
   });
