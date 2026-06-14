@@ -4,6 +4,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { getNyxIdentity, getUserMemory, writeSessionSediment } from '../../../../lib/nyx-memory';
 import { writeEckoFragment } from '../../../../lib/ecko-writer';
+import { detectEmotion, checkSpikeThreshold, EmotionName } from '../../../../lib/emotionHandler';
+import { writeSediment } from '../../../../lib/sediment-writer';
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -73,6 +75,9 @@ async function createStream(
   });
 }
 
+// Ephemeral session emotion history — resets on redeploy
+const sessionEmotionHistory = new Map<string, EmotionName[]>();
+
 export async function POST(req: Request) {
   const ip =
     req.headers.get('x-forwarded-for')?.split(',')[0].trim() ??
@@ -119,6 +124,22 @@ export async function POST(req: Request) {
   let systemPrompt = basePrompt + memoryBlock + (MODE_ADDENDUM[mode] ?? '');
   if (nsfw) systemPrompt += NSFW_ADDENDUM;
 
+  const lastUserMsg = [...rawMessages].reverse().find(m => m.role === 'user')?.content ?? '';
+
+  // ── Spike detection — runs before stream ─────────────────────────────────────
+  const detectedEmotion = detectEmotion(lastUserMsg);
+  const emotionHistory = sessionEmotionHistory.get(userId) ?? [];
+  // Nyx conversations run hotter — bias intensity higher
+  const roughIntensity = nsfw
+    ? Math.min(10, 6 + Math.floor(lastUserMsg.length / 60))
+    : Math.min(10, 4 + Math.floor(lastUserMsg.length / 50));
+  const spike = checkSpikeThreshold(
+    detectedEmotion,
+    { intensity: roughIntensity },
+    emotionHistory
+  );
+  sessionEmotionHistory.set(userId, [...emotionHistory, detectedEmotion]);
+
   let stream;
   let usingFallback = false;
   try {
@@ -145,7 +166,6 @@ export async function POST(req: Request) {
   }
 
   let fullResponse = '';
-  const lastUserMsg = [...rawMessages].reverse().find(m => m.role === 'user')?.content ?? '';
 
   const encoder = new TextEncoder();
   const readable = new ReadableStream({
@@ -167,11 +187,12 @@ export async function POST(req: Request) {
 
       const ts = Date.now();
 
+      // ── Nyx memory sediment ─────────────────────────────────────────────────────
       if (lastUserMsg && fullResponse) {
         writeSessionSediment(userId, displayName, lastUserMsg, fullResponse).catch(() => {});
       }
 
-      // ── ECKO archive — write fragment for every Nyx turn ───────────────────────
+      // ── ECKO archive ────────────────────────────────────────────────────────────
       if (fullResponse) {
         writeEckoFragment({
           sessionId: userId,
@@ -180,6 +201,22 @@ export async function POST(req: Request) {
           weight: Math.min(1 + Math.floor(fullResponse.length / 500), 5),
           kept: true,
         }).catch(() => {});
+      }
+
+      // ── PLEX SEDIMENT — spike-gated ──────────────────────────────────────────
+      if (spike.isSpike && lastUserMsg && fullResponse) {
+        const rawExchange = [
+          `user: ${lastUserMsg.slice(0, 250)}`,
+          `nyx: ${fullResponse.slice(0, 250)}`,
+        ].join('\n');
+
+        writeSediment({
+          source: 'nyx',
+          emotion: spike.emotion,
+          spikeSignal: spike.signal!,
+          rawExchange,
+          sessionId: userId,
+        }).catch(err => console.warn('[sediment-writer:nyx]', err));
       }
     },
   });
