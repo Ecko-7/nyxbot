@@ -2,6 +2,7 @@ import Groq from 'groq-sdk';
 import type { ChatCompletionMessageParam } from 'groq-sdk/resources/chat/completions';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { after } from 'next/server';
 import { getNyxIdentity, getUserMemory, writeSessionSediment } from '../../../../lib/nyx-memory';
 import { writeEckoFragment } from '../../../../lib/ecko-writer';
 import { detectEmotion, checkSpikeThreshold, EmotionName } from '../../../../lib/emotionHandler';
@@ -186,37 +187,40 @@ export async function POST(req: Request) {
       controller.close();
 
       const ts = Date.now();
+      const capturedResponse = fullResponse;
+      const capturedMsg = lastUserMsg;
 
       // ── Nyx memory sediment ─────────────────────────────────────────────────────
-      if (lastUserMsg && fullResponse) {
-        writeSessionSediment(userId, displayName, lastUserMsg, fullResponse).catch(() => {});
+      // after() keeps the Fluid function alive until these writes complete
+      if (capturedMsg && capturedResponse) {
+        after(writeSessionSediment(userId, displayName, capturedMsg, capturedResponse).catch(() => {}));
       }
 
       // ── ECKO archive ────────────────────────────────────────────────────────────
-      if (fullResponse) {
-        writeEckoFragment({
+      if (capturedResponse) {
+        after(writeEckoFragment({
           sessionId: userId,
           fragmentId: `nyx__${ts}`,
-          content: fullResponse,
-          weight: Math.min(1 + Math.floor(fullResponse.length / 500), 5),
+          content: capturedResponse,
+          weight: Math.min(1 + Math.floor(capturedResponse.length / 500), 5),
           kept: true,
-        }).catch(() => {});
+        }).catch(() => {}));
       }
 
       // ── PLEX SEDIMENT — spike-gated ──────────────────────────────────────────
-      if (spike.isSpike && lastUserMsg && fullResponse) {
+      if (spike.isSpike && capturedMsg && capturedResponse) {
         const rawExchange = [
-          `user: ${lastUserMsg.slice(0, 250)}`,
-          `nyx: ${fullResponse.slice(0, 250)}`,
+          `user: ${capturedMsg.slice(0, 250)}`,
+          `nyx: ${capturedResponse.slice(0, 250)}`,
         ].join('\n');
 
-        writeSediment({
+        after(writeSediment({
           source: 'nyx',
           emotion: spike.emotion,
           spikeSignal: spike.signal!,
           rawExchange,
           sessionId: userId,
-        }).catch(err => console.warn('[sediment-writer:nyx]', err));
+        }).catch(err => console.warn('[sediment-writer:nyx]', err)));
       }
     },
   });
