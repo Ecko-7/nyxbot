@@ -130,7 +130,6 @@ export async function POST(req: Request) {
   // ── Spike detection — runs before stream ─────────────────────────────────────
   const detectedEmotion = detectEmotion(lastUserMsg);
   const emotionHistory = sessionEmotionHistory.get(userId) ?? [];
-  // Nyx conversations run hotter — bias intensity higher
   const roughIntensity = nsfw
     ? Math.min(10, 6 + Math.floor(lastUserMsg.length / 60))
     : Math.min(10, 4 + Math.floor(lastUserMsg.length / 50));
@@ -191,13 +190,13 @@ export async function POST(req: Request) {
       const capturedMsg = lastUserMsg;
 
       // ── Nyx memory sediment ─────────────────────────────────────────────────────
-      // after() keeps the Fluid function alive until these writes complete
       if (capturedMsg && capturedResponse) {
         after(writeSessionSediment(userId, displayName, capturedMsg, capturedResponse).catch(() => {}));
       }
 
-      // ── ECKO archive ────────────────────────────────────────────────────────────
-      if (capturedResponse) {
+      // ── ECKO archive — spike-gated ──────────────────────────────────────────────
+      // Only meaningful signal goes to ecko-archive. Every exchange lives in nyx-sessions.
+      if (spike.isSpike && capturedResponse) {
         after(writeEckoFragment({
           sessionId: userId,
           fragmentId: `nyx__${ts}`,
