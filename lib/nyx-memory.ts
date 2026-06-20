@@ -1,6 +1,5 @@
 import { getDb } from './nyx-firebase';
 import { FieldValue } from 'firebase-admin/firestore';
-import { writeEckoFragment } from './ecko-writer';
 
 // --- Identity core (shared, who Nyx is) ---
 export async function getNyxIdentity(): Promise<string> {
@@ -75,27 +74,39 @@ export async function appendUserSediment(
   }, { merge: true });
 }
 
-// --- Session sediment ---
+// --- Session storage (nyx-sessions/{userId}/sessions/{date}) ---
+// One doc per day per user. Exchanges appended as an array.
+// Clean, queryable, never collapses into a blob.
 export async function writeSessionSediment(
   userId: string,
   displayName: string | undefined,
   userMsg: string,
   nyxMsg: string
 ): Promise<void> {
+  const db = getDb();
+  const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
   const name = displayName ?? 'User';
-  const fragment = `[${new Date().toISOString()}]\n${name}: ${userMsg.slice(0, 300)}\nNyx: ${nyxMsg.slice(0, 300)}`;
 
-  // Existing sediment write — unchanged
+  const exchange = {
+    ts: new Date().toISOString(),
+    user: userMsg.slice(0, 500),
+    nyx: nyxMsg.slice(0, 500),
+    displayName: name,
+  };
+
+  // Write to nyx-sessions collection
+  const sessionRef = db
+    .collection('nyx-sessions')
+    .doc(userId)
+    .collection('sessions')
+    .doc(date);
+
+  await sessionRef.set({
+    exchanges: FieldValue.arrayUnion(exchange),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  // Keep rolling nyx-memory summary alive for prompt injection
+  const fragment = `[${exchange.ts}]\n${name}: ${userMsg.slice(0, 300)}\nNyx: ${nyxMsg.slice(0, 300)}`;
   await appendUserSediment(userId, fragment);
-
-  // ECKO bridge — fire and forget
-  // Writes to ecko-archive/{userId}/fragments/{ts} with source: 'nyx'
-  // Dynamic weight matches the route handler formula: min(1 + floor(length / 500), 5)
-  writeEckoFragment({
-    sessionId: userId,
-    fragmentId: `${Date.now()}`,
-    content: fragment,
-    weight: Math.min(1 + Math.floor(fragment.length / 500), 5),
-    kept: true,
-  }).catch(() => {});
 }
