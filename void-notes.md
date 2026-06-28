@@ -57,3 +57,7 @@ Beautiful ideas that block no sprints, haunt no specs, and wait patiently
 for the moment when the bones are ready to hold them.
 
 This file is that document. Named honestly.
+
+---
+
+<!-- 2026-06-28: redeploy marker — KB wiring live -->
