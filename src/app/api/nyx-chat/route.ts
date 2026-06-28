@@ -57,6 +57,34 @@ function isRateLimitError(err: unknown): boolean {
   return false;
 }
 
+// ── Command Hub KB search ─────────────────────────────────────────────────────
+// Soft-fails silently — KB context is additive, never load-bearing.
+async function searchCommandHub(query: string, collection = 'manitec-docs-public'): Promise<string> {
+  const apiKey = process.env.NYXBOT_API_KEY;
+  const hubUrl = process.env.COMMAND_HUB_URL;
+  if (!apiKey || !hubUrl) return '';
+  try {
+    const res = await fetch(`${hubUrl}/v1/commands/search_docs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Bot-Identity': apiKey,
+      },
+      body: JSON.stringify({ query, collection, limit: 3 }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return '';
+    const data = await res.json() as { results?: { title: string; snippet: string }[] };
+    const results = data.results ?? [];
+    if (!results.length) return '';
+    return results
+      .map(r => `[${r.title}] ${r.snippet}`)
+      .join('\n');
+  } catch {
+    return '';
+  }
+}
+
 async function createStream(
   model: string,
   messages: ChatCompletionMessageParam[],
@@ -111,9 +139,12 @@ export async function POST(req: Request) {
     }));
   const messages = allMessages.slice(-MAX_CONTEXT_MESSAGES);
 
-  const [identityCore, userMemory] = await Promise.all([
+  const lastUserMsg = [...rawMessages].reverse().find(m => m.role === 'user')?.content ?? '';
+
+  const [identityCore, userMemory, kbContext] = await Promise.all([
     getNyxIdentity(),
     getUserMemory(userId),
+    searchCommandHub(lastUserMsg),
   ]);
 
   const basePrompt = loadSystemPrompt();
@@ -121,11 +152,10 @@ export async function POST(req: Request) {
   if (identityCore) memoryBlock += `\n\n--- Nyx Identity Core ---\n${identityCore}`;
   if (userMemory) memoryBlock += `\n\n--- Your relationship with this person ---\n${userMemory}`;
   if (displayName) memoryBlock += `\n\nThe person you are talking to goes by: ${displayName}`;
+  if (kbContext) memoryBlock += `\n\n--- Manitec knowledge (use only if relevant) ---\n${kbContext}`;
 
   let systemPrompt = basePrompt + memoryBlock + (MODE_ADDENDUM[mode] ?? '');
   if (nsfw) systemPrompt += NSFW_ADDENDUM;
-
-  const lastUserMsg = [...rawMessages].reverse().find(m => m.role === 'user')?.content ?? '';
 
   // ── Spike detection — runs before stream ─────────────────────────────────────
   const detectedEmotion = detectEmotion(lastUserMsg);
@@ -195,7 +225,6 @@ export async function POST(req: Request) {
       }
 
       // ── ECKO archive — spike-gated ──────────────────────────────────────────────
-      // Only meaningful signal goes to ecko-archive. Every exchange lives in nyx-sessions.
       if (spike.isSpike && capturedResponse) {
         after(writeEckoFragment({
           sessionId: userId,
