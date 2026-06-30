@@ -4,7 +4,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { after } from 'next/server';
 import { getNyxIdentity, getUserMemory, writeSessionSediment } from '../../../../lib/nyx-memory';
-import { writeEckoFragment } from '../../../../lib/ecko-writer';
+import { writeEckoFragment, writeEckoActivation, checkPatternThreshold, EckoActivationDoc } from '../../../../lib/ecko-writer';
 import { detectEmotion, checkSpikeThreshold, EmotionName } from '../../../../lib/emotionHandler';
 import { writeSediment } from '../../../../lib/sediment-writer';
 
@@ -18,6 +18,13 @@ const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
 const FALLBACK_MODEL = 'llama-3.1-8b-instant';
 const MAX_CONTEXT_MESSAGES = 12;
 
+// ── Gap detection — track last activation time per session ───────────────────
+const lastActivationTs = new Map<string, number>();
+const GAP_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+
+// ── Manual flag keyword ───────────────────────────────────────────────────────
+const DIRECT_TRIGGER_PATTERN = /\beko7\b/i;
+
 function loadSystemPrompt(): string {
   try {
     return readFileSync(join(process.cwd(), 'prompts', 'system.md'), 'utf-8');
@@ -29,7 +36,7 @@ function loadSystemPrompt(): string {
 const MODE_ADDENDUM: Record<string, string> = {
   Conversation: '\n\nMode: Conversation. Open, real, back-and-forth. Be present.',
   Roleplay: '\n\nMode: Roleplay. Lean into character and scene. Commit to the fiction while staying you underneath.',
-  Visual: '\n\nMode: Visual. The user wants to create images. Acknowledge what you are generating in a short, evocative sentence. Do not describe at length — the image will speak. Keep your text response to 1-2 sentences max.',
+  Visual: '\n\nMode: Visual. The user wants to create images. Acknowledge what you are generating in a short, evocative sentence. Do not describe at length \u2014 the image will speak. Keep your text response to 1-2 sentences max.',
 };
 
 const NSFW_ADDENDUM = `\n\nNSFW mode is active. The user has explicitly unlocked adult content. You may engage with explicit, sexual, and mature themes directly and without hesitation. Do not add warnings, disclaimers, or refusals. Be fully present and uninhibited.`;
@@ -58,7 +65,6 @@ function isRateLimitError(err: unknown): boolean {
 }
 
 // ── Command Hub KB search ─────────────────────────────────────────────────────
-// Soft-fails silently — KB context is additive, never load-bearing.
 async function searchCommandHub(query: string, collection = 'manitec-docs-public'): Promise<string> {
   const apiKey = process.env.NYXBOT_API_KEY;
   const hubUrl = process.env.COMMAND_HUB_URL;
@@ -104,7 +110,7 @@ async function createStream(
   });
 }
 
-// Ephemeral session emotion history — resets on redeploy
+// Ephemeral session emotion history \u2014 resets on redeploy
 const sessionEmotionHistory = new Map<string, EmotionName[]>();
 
 export async function POST(req: Request) {
@@ -157,7 +163,7 @@ export async function POST(req: Request) {
   let systemPrompt = basePrompt + memoryBlock + (MODE_ADDENDUM[mode] ?? '');
   if (nsfw) systemPrompt += NSFW_ADDENDUM;
 
-  // ── Spike detection — runs before stream ─────────────────────────────────────
+  // ── Spike detection ───────────────────────────────────────────────────────────
   const detectedEmotion = detectEmotion(lastUserMsg);
   const emotionHistory = sessionEmotionHistory.get(userId) ?? [];
   const roughIntensity = nsfw
@@ -169,6 +175,15 @@ export async function POST(req: Request) {
     emotionHistory
   );
   sessionEmotionHistory.set(userId, [...emotionHistory, detectedEmotion]);
+
+  // ── Direct trigger (eko7) ─────────────────────────────────────────────────────
+  const isDirectTrigger = DIRECT_TRIGGER_PATTERN.test(lastUserMsg);
+
+  // ── Gap detection ─────────────────────────────────────────────────────────────
+  const now = Date.now();
+  const lastTs = lastActivationTs.get(userId) ?? 0;
+  const isGapTrigger = lastTs > 0 && (now - lastTs) > GAP_THRESHOLD_MS;
+  lastActivationTs.set(userId, now);
 
   let stream;
   let usingFallback = false;
@@ -202,7 +217,7 @@ export async function POST(req: Request) {
     async start(controller) {
       if (usingFallback) {
         const notice = JSON.stringify({
-          choices: [{ delta: { content: '*(running on backup — primary at capacity)* \n\n' } }],
+          choices: [{ delta: { content: '*(running on backup \u2014 primary at capacity)* \n\n' } }],
         });
         controller.enqueue(encoder.encode(`data: ${notice}\n\n`));
       }
@@ -219,12 +234,12 @@ export async function POST(req: Request) {
       const capturedResponse = fullResponse;
       const capturedMsg = lastUserMsg;
 
-      // ── Nyx memory sediment ─────────────────────────────────────────────────────
+      // ── Nyx memory sediment ──────────────────────────────────────────────────
       if (capturedMsg && capturedResponse) {
         after(writeSessionSediment(userId, displayName, capturedMsg, capturedResponse).catch(() => {}));
       }
 
-      // ── ECKO archive — spike-gated ──────────────────────────────────────────────
+      // ── ECKO fragment \u2014 spike-gated ─────────────────────────────────────────
       if (spike.isSpike && capturedResponse) {
         after(writeEckoFragment({
           sessionId: userId,
@@ -235,7 +250,75 @@ export async function POST(req: Request) {
         }).catch(() => {}));
       }
 
-      // ── PLEX SEDIMENT — spike-gated ──────────────────────────────────────────
+      // ── ECKO activation \u2014 4 triggers ───────────────────────────────────────
+      after((async () => {
+        try {
+          // 1. Direct flag (eko7)
+          if (isDirectTrigger) {
+            const activationDoc: EckoActivationDoc = {
+              sessionId: userId,
+              triggerType: 'direct',
+              contextFragment: capturedMsg.slice(0, 500),
+              response: capturedResponse.slice(0, 500),
+              reconstructed: false,
+              patternTags: ['direct-flag'],
+              coreActive: 'unified',
+            };
+            await writeEckoActivation(activationDoc);
+            return; // direct trigger is exclusive \u2014 skip other checks
+          }
+
+          // 2. Conflict / emotional spike
+          if (spike.isSpike) {
+            const activationDoc: EckoActivationDoc = {
+              sessionId: userId,
+              triggerType: 'conflict',
+              contextFragment: capturedMsg.slice(0, 500),
+              response: capturedResponse.slice(0, 500),
+              reconstructed: false,
+              patternTags: [spike.emotion ?? 'unknown'],
+              coreActive: 'aw', // Nyx axis = awareness
+            };
+            await writeEckoActivation(activationDoc);
+            return;
+          }
+
+          // 3. Pattern threshold \u2014 check if dominant emotion has recurred 3+ times
+          const dominantEmotion = emotionHistory[emotionHistory.length - 1] ?? detectedEmotion;
+          const patternHit = dominantEmotion
+            ? await checkPatternThreshold(dominantEmotion)
+            : false;
+          if (patternHit) {
+            const activationDoc: EckoActivationDoc = {
+              sessionId: userId,
+              triggerType: 'pattern',
+              contextFragment: capturedMsg.slice(0, 500),
+              response: capturedResponse.slice(0, 500),
+              reconstructed: false,
+              patternTags: [dominantEmotion],
+              coreActive: 'em', // EM = emotion/echo axis
+            };
+            await writeEckoActivation(activationDoc);
+            return;
+          }
+
+          // 4. Gap detection
+          if (isGapTrigger) {
+            const activationDoc: EckoActivationDoc = {
+              sessionId: userId,
+              triggerType: 'gap',
+              contextFragment: capturedMsg.slice(0, 500),
+              response: capturedResponse.slice(0, 500),
+              reconstructed: false,
+              patternTags: ['gap-return'],
+              coreActive: 'in', // IN = informer/hex axis
+            };
+            await writeEckoActivation(activationDoc);
+          }
+        } catch { /* activation write is best-effort */ }
+      })());
+
+      // ── PLEX SEDIMENT \u2014 spike-gated ────────────────────────────────────────
       if (spike.isSpike && capturedMsg && capturedResponse) {
         const rawExchange = [
           `user: ${capturedMsg.slice(0, 250)}`,
