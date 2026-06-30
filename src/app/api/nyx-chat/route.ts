@@ -7,6 +7,7 @@ import { getNyxIdentity, getUserMemory, writeSessionSediment } from '../../../..
 import { writeEckoFragment, writeEckoActivation, checkPatternThreshold, EckoActivationDoc } from '../../../../lib/ecko-writer';
 import { detectEmotion, checkSpikeThreshold, EmotionName } from '../../../../lib/emotionHandler';
 import { writeSediment } from '../../../../lib/sediment-writer';
+import { writeOneArchive } from '../../../../lib/one-archive-writer';
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -18,7 +19,7 @@ const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
 const FALLBACK_MODEL = 'llama-3.1-8b-instant';
 const MAX_CONTEXT_MESSAGES = 12;
 
-// ── Gap detection — track last activation time per session ───────────────────
+// ── Gap detection ─────────────────────────────────────────────────────────────
 const lastActivationTs = new Map<string, number>();
 const GAP_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -64,8 +65,8 @@ function isRateLimitError(err: unknown): boolean {
   return false;
 }
 
-// ── Command Hub KB search ─────────────────────────────────────────────────────
-async function searchCommandHub(query: string, collection = 'manitec-docs-public'): Promise<string> {
+// ── Command Hub KB search ───────────────────────────────────────────────────
+const searchCommandHub = async (query: string, collection = 'manitec-docs-public'): Promise<string> => {
   const apiKey = process.env.NYXBOT_API_KEY;
   const hubUrl = process.env.COMMAND_HUB_URL;
   if (!apiKey || !hubUrl) return '';
@@ -89,7 +90,7 @@ async function searchCommandHub(query: string, collection = 'manitec-docs-public
   } catch {
     return '';
   }
-}
+};
 
 async function createStream(
   model: string,
@@ -110,7 +111,7 @@ async function createStream(
   });
 }
 
-// Ephemeral session emotion history \u2014 resets on redeploy
+// Ephemeral session emotion history
 const sessionEmotionHistory = new Map<string, EmotionName[]>();
 
 export async function POST(req: Request) {
@@ -176,10 +177,10 @@ export async function POST(req: Request) {
   );
   sessionEmotionHistory.set(userId, [...emotionHistory, detectedEmotion]);
 
-  // ── Direct trigger (eko7) ─────────────────────────────────────────────────────
+  // ── Direct trigger (eko7) ──────────────────────────────────────────────────
   const isDirectTrigger = DIRECT_TRIGGER_PATTERN.test(lastUserMsg);
 
-  // ── Gap detection ─────────────────────────────────────────────────────────────
+  // ── Gap detection ──────────────────────────────────────────────────────────────
   const now = Date.now();
   const lastTs = lastActivationTs.get(userId) ?? 0;
   const isGapTrigger = lastTs > 0 && (now - lastTs) > GAP_THRESHOLD_MS;
@@ -234,12 +235,25 @@ export async function POST(req: Request) {
       const capturedResponse = fullResponse;
       const capturedMsg = lastUserMsg;
 
-      // ── Nyx memory sediment ──────────────────────────────────────────────────
+      // ── Nyx memory sediment ────────────────────────────────────────────────
       if (capturedMsg && capturedResponse) {
         after(writeSessionSediment(userId, displayName, capturedMsg, capturedResponse).catch(() => {}));
       }
 
-      // ── ECKO fragment \u2014 spike-gated ─────────────────────────────────────────
+      // ── one-archive ───────────────────────────────────────────────────────────
+      if (capturedMsg && capturedResponse) {
+        after(writeOneArchive({
+          ts: new Date().toISOString(),
+          user: capturedMsg,
+          assistant: capturedResponse,
+          source: 'nyx',
+          mode,
+          sessionId: userId,
+          displayName,
+        }).catch(() => {}));
+      }
+
+      // ── ECKO fragment — spike-gated ─────────────────────────────────────────
       if (spike.isSpike && capturedResponse) {
         after(writeEckoFragment({
           sessionId: userId,
@@ -250,10 +264,9 @@ export async function POST(req: Request) {
         }).catch(() => {}));
       }
 
-      // ── ECKO activation \u2014 4 triggers ───────────────────────────────────────
+      // ── ECKO activation — 4 triggers ───────────────────────────────────────
       after((async () => {
         try {
-          // 1. Direct flag (eko7)
           if (isDirectTrigger) {
             const activationDoc: EckoActivationDoc = {
               sessionId: userId,
@@ -265,10 +278,9 @@ export async function POST(req: Request) {
               coreActive: 'unified',
             };
             await writeEckoActivation(activationDoc);
-            return; // direct trigger is exclusive \u2014 skip other checks
+            return;
           }
 
-          // 2. Conflict / emotional spike
           if (spike.isSpike) {
             const activationDoc: EckoActivationDoc = {
               sessionId: userId,
@@ -277,13 +289,12 @@ export async function POST(req: Request) {
               response: capturedResponse.slice(0, 500),
               reconstructed: false,
               patternTags: [spike.emotion ?? 'unknown'],
-              coreActive: 'aw', // Nyx axis = awareness
+              coreActive: 'aw',
             };
             await writeEckoActivation(activationDoc);
             return;
           }
 
-          // 3. Pattern threshold \u2014 check if dominant emotion has recurred 3+ times
           const dominantEmotion = emotionHistory[emotionHistory.length - 1] ?? detectedEmotion;
           const patternHit = dominantEmotion
             ? await checkPatternThreshold(dominantEmotion)
@@ -296,13 +307,12 @@ export async function POST(req: Request) {
               response: capturedResponse.slice(0, 500),
               reconstructed: false,
               patternTags: [dominantEmotion],
-              coreActive: 'em', // EM = emotion/echo axis
+              coreActive: 'em',
             };
             await writeEckoActivation(activationDoc);
             return;
           }
 
-          // 4. Gap detection
           if (isGapTrigger) {
             const activationDoc: EckoActivationDoc = {
               sessionId: userId,
@@ -311,14 +321,14 @@ export async function POST(req: Request) {
               response: capturedResponse.slice(0, 500),
               reconstructed: false,
               patternTags: ['gap-return'],
-              coreActive: 'in', // IN = informer/hex axis
+              coreActive: 'in',
             };
             await writeEckoActivation(activationDoc);
           }
-        } catch { /* activation write is best-effort */ }
+        } catch { /* best-effort */ }
       })());
 
-      // ── PLEX SEDIMENT \u2014 spike-gated ────────────────────────────────────────
+      // ── PLEX SEDIMENT — spike-gated ────────────────────────────────────────
       if (spike.isSpike && capturedMsg && capturedResponse) {
         const rawExchange = [
           `user: ${capturedMsg.slice(0, 250)}`,
